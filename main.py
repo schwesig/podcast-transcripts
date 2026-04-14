@@ -24,6 +24,8 @@ PODCASTS = BASE / "podcasts"
 PODCASTS.mkdir(exist_ok=True)
 PENDING = BASE / ".pending"
 PENDING.mkdir(exist_ok=True)
+STATIC = BASE / "static"
+STATIC.mkdir(exist_ok=True)
 
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
@@ -207,7 +209,7 @@ async def limit_body_size(request: Request, call_next):
                 status_code=413,
             )
     return await call_next(request)
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 HTML_TAG = re.compile(r"<[^>]+>")
