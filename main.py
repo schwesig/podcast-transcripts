@@ -1,93 +1,209 @@
-from pathlib import Path
-from datetime import datetime
+import json
 import re
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from html import unescape
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 BASE = Path(__file__).parent
-TRANSCRIPTS = BASE / "transcripts"
-TRANSCRIPTS.mkdir(exist_ok=True)
+PODCASTS = BASE / "podcasts"
+PODCASTS.mkdir(exist_ok=True)
 
 app = FastAPI(title="Podcast Transcripts")
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
+HTML_TAG = re.compile(r"<[^>]+>")
 
-def human_size(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
+
+def strip_html(s: str) -> str:
+    return unescape(HTML_TAG.sub(" ", s or "")).strip()
 
 
 def slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-") or "unknown"
 
 
-def load_episodes() -> list[dict]:
-    episodes: dict[str, dict] = {}
-    for path in sorted(TRANSCRIPTS.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in (".txt", ".srt"):
-            continue
-        stem = path.stem
-        ep = episodes.setdefault(
-            stem,
-            {
-                "title": stem.replace("_", " ").replace("-", " ").title(),
-                "slug": slugify(stem),
-                "stem": stem,
-                "formats": {},
-                "mtime": 0,
-            },
-        )
-        st = path.stat()
-        ep["formats"][path.suffix.lower().lstrip(".")] = {
-            "filename": path.name,
-            "size": human_size(st.st_size),
-        }
-        ep["mtime"] = max(ep["mtime"], st.st_mtime)
-
-    out = list(episodes.values())
-    for ep in out:
-        ep["date"] = datetime.fromtimestamp(ep["mtime"]).strftime("%Y-%m-%d")
-    out.sort(key=lambda e: e["mtime"], reverse=True)
-    return out
+def human_size(n: int) -> str:
+    f = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if f < 1024:
+            return f"{f:.0f} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+        f /= 1024
+    return f"{f:.1f} TB"
 
 
-def safe_file(filename: str) -> Path:
-    path = (TRANSCRIPTS / filename).resolve()
-    if TRANSCRIPTS.resolve() not in path.parents:
+def parse_date(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        return parsedate_to_datetime(s).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(s).strftime("%Y-%m-%d")
+    except Exception:
+        return s[:10] if len(s) >= 10 else s
+
+
+def safe_subpath(rel: str) -> Path:
+    root = PODCASTS.resolve()
+    path = (root / rel).resolve()
+    if root != path and root not in path.parents:
         raise HTTPException(404)
-    if not path.is_file() or path.suffix.lower() not in (".txt", ".srt"):
+    if not path.is_file():
+        raise HTTPException(404)
+    if path.suffix.lower().lstrip(".") not in ("txt", "srt", "json"):
         raise HTTPException(404)
     return path
 
 
+def load_episode(ep_dir: Path) -> dict | None:
+    files: dict[str, Path] = {}
+    for p in ep_dir.iterdir():
+        if p.is_file():
+            ext = p.suffix.lower().lstrip(".")
+            if ext in ("json", "txt", "srt"):
+                files[ext] = p
+    if not files:
+        return None
+    meta: dict = {}
+    if "json" in files:
+        try:
+            meta = json.loads(files["json"].read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+    base_file = files.get("txt") or files.get("srt") or files["json"]
+    show = meta.get("podcast") or ep_dir.parent.name
+    ep = {
+        "show": show,
+        "show_slug": slugify(show),
+        "title": meta.get("title") or base_file.stem,
+        "episode_number": str(meta.get("episode_number") or ""),
+        "date": parse_date(meta.get("date") or ""),
+        "duration": meta.get("duration") or "",
+        "summary": strip_html(meta.get("summary") or meta.get("shownotes") or ""),
+        "stem": base_file.stem,
+        "rel_dir": str(ep_dir.relative_to(PODCASTS)),
+        "formats": {},
+        "mtime": max(p.stat().st_mtime for p in files.values()),
+    }
+    for ext, p in files.items():
+        ep["formats"][ext] = {
+            "filename": p.name,
+            "rel": str(p.relative_to(PODCASTS)),
+            "size": human_size(p.stat().st_size),
+        }
+    return ep
+
+
+def load_shows() -> dict[str, dict]:
+    shows: dict[str, dict] = {}
+    if not PODCASTS.exists():
+        return shows
+    for show_dir in sorted(PODCASTS.iterdir()):
+        if not show_dir.is_dir():
+            continue
+        for ep_dir in sorted(show_dir.iterdir()):
+            if not ep_dir.is_dir():
+                continue
+            ep = load_episode(ep_dir)
+            if not ep:
+                continue
+            show = shows.setdefault(
+                ep["show"],
+                {"name": ep["show"], "slug": slugify(ep["show"]), "episodes": []},
+            )
+            show["episodes"].append(ep)
+    for show in shows.values():
+        show["episodes"].sort(key=lambda e: (e["date"], e["mtime"]), reverse=True)
+    return dict(sorted(shows.items(), key=lambda kv: kv[0].lower()))
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    shows = load_shows()
+    total = sum(len(s["episodes"]) for s in shows.values())
     return templates.TemplateResponse(
-        request, "index.html", {"episodes": load_episodes()}
+        request,
+        "index.html",
+        {"shows": shows, "total": total},
     )
+
+
+@app.post("/upload")
+async def upload(
+    json_file: UploadFile = File(...),
+    txt_file: UploadFile = File(...),
+    srt_file: UploadFile = File(...),
+):
+    json_bytes = await json_file.read()
+    try:
+        meta = json.loads(json_bytes.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(400, f"JSON parse error: {e}")
+    show = meta.get("podcast")
+    title = meta.get("title")
+    if not show or not title:
+        raise HTTPException(400, "JSON must contain 'podcast' and 'title'")
+    date_str = parse_date(meta.get("date") or "")
+    show_slug = slugify(show)
+    title_slug = slugify(title)
+    stem_date = date_str or datetime.now().strftime("%Y-%m-%d")
+    stem = f"{stem_date}_{title_slug}"
+    ep_dir = PODCASTS / show_slug / title_slug
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    (ep_dir / f"{stem}.json").write_bytes(json_bytes)
+    (ep_dir / f"{stem}.txt").write_bytes(await txt_file.read())
+    (ep_dir / f"{stem}.srt").write_bytes(await srt_file.read())
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/download/{rel:path}")
+def download(rel: str):
+    path = safe_subpath(rel)
+    return FileResponse(path, filename=path.name, media_type="application/octet-stream")
+
+
+@app.get("/preview/{rel:path}", response_class=PlainTextResponse)
+def preview(rel: str):
+    path = safe_subpath(rel)
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 @app.get("/api/search")
 def search(q: str = ""):
     q = q.strip().lower()
-    episodes = load_episodes()
+    shows = load_shows()
+    all_eps: list[dict] = []
+    for show in shows.values():
+        all_eps.extend(show["episodes"])
     if not q:
-        return {"episodes": episodes}
+        return {"episodes": all_eps}
     hits = []
-    for ep in episodes:
-        if q in ep["title"].lower() or q in ep["stem"].lower():
+    for ep in all_eps:
+        if q in ep["title"].lower() or q in ep["show"].lower():
             hits.append({**ep, "match": "title"})
             continue
-        txt = ep["formats"].get("txt")
-        if txt:
-            content = (TRANSCRIPTS / txt["filename"]).read_text(
+        if q in ep["summary"].lower():
+            idx = ep["summary"].lower().find(q)
+            start = max(0, idx - 60)
+            end = min(len(ep["summary"]), idx + len(q) + 60)
+            hits.append({**ep, "match": "summary", "snippet": f"…{ep['summary'][start:end]}…"})
+            continue
+        txt_fmt = ep["formats"].get("txt")
+        if txt_fmt:
+            content = (PODCASTS / txt_fmt["rel"]).read_text(
                 encoding="utf-8", errors="ignore"
             )
             idx = content.lower().find(q)
@@ -97,15 +213,3 @@ def search(q: str = ""):
                 snippet = content[start:end].replace("\n", " ")
                 hits.append({**ep, "match": "content", "snippet": f"…{snippet}…"})
     return {"episodes": hits}
-
-
-@app.get("/download/{filename}")
-def download(filename: str):
-    path = safe_file(filename)
-    return FileResponse(path, filename=filename, media_type="application/octet-stream")
-
-
-@app.get("/preview/{filename}", response_class=PlainTextResponse)
-def preview(filename: str):
-    path = safe_file(filename)
-    return path.read_text(encoding="utf-8", errors="ignore")

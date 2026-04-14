@@ -9,9 +9,58 @@
   <style>
     .snippet mark { background: oklch(var(--p)); color: oklch(var(--pc)); padding: 0 2px; border-radius: 2px; }
     pre.transcript { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+    .tabs-lg > .tab { height: 3rem; }
+    .summary-clip { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   </style>
 </head>
 <body class="min-h-screen bg-base-200">
+  {% macro render_episode(ep) -%}
+  <div class="card bg-base-100 shadow-md hover:shadow-xl transition-shadow">
+    <div class="card-body">
+      <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="flex-1 min-w-[16rem]">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h3 class="card-title">{{ ep.title }}</h3>
+            {% if ep.episode_number %}<span class="badge badge-accent">#{{ ep.episode_number }}</span>{% endif %}
+          </div>
+          <div class="text-xs opacity-70 mt-1 flex gap-3 flex-wrap">
+            <span class="font-medium">{{ ep.show }}</span>
+            {% if ep.date %}<span>{{ ep.date }}</span>{% endif %}
+            {% if ep.duration %}<span>{{ ep.duration }}</span>{% endif %}
+          </div>
+          {% if ep.summary %}
+          <p class="summary-clip text-sm mt-2 opacity-80">{{ ep.summary }}</p>
+          {% endif %}
+        </div>
+        <div class="flex flex-col gap-2 shrink-0">
+          <div class="flex gap-1 flex-wrap justify-end">
+            {% if ep.formats.txt %}
+            <a class="btn btn-xs btn-primary" href="/download/{{ ep.formats.txt.rel }}">TXT · {{ ep.formats.txt.size }}</a>
+            {% endif %}
+            {% if ep.formats.srt %}
+            <a class="btn btn-xs btn-secondary" href="/download/{{ ep.formats.srt.rel }}">SRT · {{ ep.formats.srt.size }}</a>
+            {% endif %}
+            {% if ep.formats.json %}
+            <a class="btn btn-xs btn-accent" href="/download/{{ ep.formats.json.rel }}">JSON · {{ ep.formats.json.size }}</a>
+            {% endif %}
+          </div>
+          <div class="flex gap-1 flex-wrap justify-end">
+            {% if ep.formats.txt %}
+            <button class="btn btn-xs btn-outline btn-primary" onclick='preview({{ ep.formats.txt.rel|tojson }}, {{ (ep.title ~ " · TXT")|tojson }})'>TXT Vorschau</button>
+            {% endif %}
+            {% if ep.formats.srt %}
+            <button class="btn btn-xs btn-outline btn-secondary" onclick='preview({{ ep.formats.srt.rel|tojson }}, {{ (ep.title ~ " · SRT")|tojson }})'>SRT Vorschau</button>
+            {% endif %}
+            {% if ep.formats.json %}
+            <button class="btn btn-xs btn-outline btn-accent" onclick='preview({{ ep.formats.json.rel|tojson }}, {{ (ep.title ~ " · JSON")|tojson }})'>JSON Vorschau</button>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {%- endmacro %}
+
   <div class="navbar bg-base-100 shadow-lg sticky top-0 z-20">
     <div class="flex-1">
       <a class="btn btn-ghost text-xl">
@@ -23,15 +72,17 @@
       </a>
     </div>
     <div class="flex-none gap-2">
-      <span class="badge badge-primary badge-outline" id="count">{{ episodes|length }} Episoden</span>
+      <span class="badge badge-primary badge-outline">{{ total }} Episoden</span>
+      <span class="badge badge-secondary badge-outline">{{ shows|length }} Shows</span>
+      <button class="btn btn-sm btn-primary" onclick="upload_modal.showModal()">+ Upload</button>
     </div>
   </div>
 
-  <main class="container mx-auto p-4 max-w-5xl">
+  <main class="container mx-auto p-4 max-w-6xl">
     <div class="card bg-base-100 shadow-xl mb-6">
       <div class="card-body">
         <h2 class="card-title">Suche</h2>
-        <p class="text-sm opacity-70">Suche in Titel oder Volltext der Transkripte.</p>
+        <p class="text-sm opacity-70">Suche in Titel, Show, Summary und Volltext (TXT).</p>
         <div class="join w-full mt-2">
           <input id="q" type="search" placeholder="Suchbegriff…"
                  class="input input-bordered join-item w-full" />
@@ -41,39 +92,73 @@
       </div>
     </div>
 
-    <div id="list" class="grid gap-4">
-      {% for ep in episodes %}
-      <div class="card bg-base-100 shadow-md hover:shadow-xl transition-shadow" data-title="{{ ep.title|lower }}" data-stem="{{ ep.stem|lower }}">
-        <div class="card-body">
-          <div class="flex items-start justify-between gap-4 flex-wrap">
-            <div>
-              <h3 class="card-title">{{ ep.title }}</h3>
-              <div class="text-xs opacity-60">{{ ep.date }}</div>
-            </div>
-            <div class="flex gap-2 flex-wrap">
-              {% if ep.formats.txt %}
-              <a class="btn btn-sm btn-primary" href="/download/{{ ep.formats.txt.filename }}">
-                TXT · {{ ep.formats.txt.size }}
-              </a>
-              <button class="btn btn-sm btn-outline btn-primary" onclick="preview('{{ ep.formats.txt.filename }}', '{{ ep.title|e }} · TXT')">TXT Vorschau</button>
-              {% endif %}
-              {% if ep.formats.srt %}
-              <a class="btn btn-sm btn-secondary" href="/download/{{ ep.formats.srt.filename }}">
-                SRT · {{ ep.formats.srt.size }}
-              </a>
-              <button class="btn btn-sm btn-outline btn-secondary" onclick="preview('{{ ep.formats.srt.filename }}', '{{ ep.title|e }} · SRT')">SRT Vorschau</button>
-              {% endif %}
-            </div>
-          </div>
-        </div>
+    <section id="search_view" class="hidden">
+      <h2 class="text-xl font-semibold mb-3"><span id="search_count">0</span> Treffer für „<span id="search_term"></span>"</h2>
+      <div id="search_results" class="grid gap-4"></div>
+    </section>
+
+    <section id="tab_view">
+      {% if shows %}
+      <div role="tablist" class="tabs tabs-lg tabs-boxed bg-base-100 mb-4 flex-wrap">
+        <a role="tab" class="tab tab-active" data-show-tab="__all__" onclick="switchTab('__all__', this)">Alle</a>
+        {% for slug, show in shows.items() %}
+        <a role="tab" class="tab" data-show-tab="{{ show.slug }}" onclick="switchTab('{{ show.slug }}', this)">
+          {{ show.name }} <span class="badge badge-sm ml-2">{{ show.episodes|length }}</span>
+        </a>
+        {% endfor %}
       </div>
-      {% else %}
-      <div class="alert alert-info">
-        <span>Noch keine Transkripte. Lege <code>.txt</code> oder <code>.srt</code> Dateien in <code>transcripts/</code> ab.</span>
+
+      <div class="grid gap-4" data-show-panel="__all__">
+        {% for slug, show in shows.items() %}
+          {% for ep in show.episodes %}
+          {{ render_episode(ep) }}
+          {% endfor %}
+        {% endfor %}
+      </div>
+
+      {% for slug, show in shows.items() %}
+      <div class="grid gap-4 hidden" data-show-panel="{{ show.slug }}">
+        {% for ep in show.episodes %}
+        {{ render_episode(ep) }}
+        {% endfor %}
       </div>
       {% endfor %}
-    </div>
+      {% else %}
+      <div class="alert alert-info">
+        <span>Noch keine Episoden. Klick oben rechts auf <b>+ Upload</b> um JSON + TXT + SRT einer Episode hochzuladen.</span>
+      </div>
+      {% endif %}
+    </section>
   </main>
+
+  <dialog id="upload_modal" class="modal">
+    <div class="modal-box max-w-2xl">
+      <form method="dialog">
+        <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
+      </form>
+      <h3 class="font-bold text-lg mb-2">Episode hochladen</h3>
+      <p class="text-sm opacity-70 mb-4">Drei Dateien einer Episode: <code>JSON</code>, <code>TXT</code>, <code>SRT</code>. Show & Titel werden aus dem JSON gelesen.</p>
+      <form action="/upload" method="post" enctype="multipart/form-data" class="space-y-3">
+        <label class="form-control w-full">
+          <div class="label"><span class="label-text">JSON (Metadata)</span></div>
+          <input type="file" name="json_file" accept=".json,application/json" required class="file-input file-input-bordered w-full" />
+        </label>
+        <label class="form-control w-full">
+          <div class="label"><span class="label-text">TXT (Transkript)</span></div>
+          <input type="file" name="txt_file" accept=".txt,text/plain" required class="file-input file-input-bordered w-full" />
+        </label>
+        <label class="form-control w-full">
+          <div class="label"><span class="label-text">SRT (Untertitel)</span></div>
+          <input type="file" name="srt_file" accept=".srt" required class="file-input file-input-bordered w-full" />
+        </label>
+        <div class="modal-action">
+          <button type="button" class="btn btn-ghost" onclick="upload_modal.close()">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Hochladen</button>
+        </div>
+      </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  </dialog>
 
   <dialog id="preview_modal" class="modal">
     <div class="modal-box max-w-4xl">
@@ -89,8 +174,19 @@
 
   <script>
     const qInput = document.getElementById('q');
-    const list = document.getElementById('list');
-    const count = document.getElementById('count');
+    const tabView = document.getElementById('tab_view');
+    const searchView = document.getElementById('search_view');
+    const searchResults = document.getElementById('search_results');
+    const searchCount = document.getElementById('search_count');
+    const searchTerm = document.getElementById('search_term');
+
+    function switchTab(slug, el) {
+      document.querySelectorAll('[data-show-tab]').forEach(t => t.classList.remove('tab-active'));
+      el.classList.add('tab-active');
+      document.querySelectorAll('[data-show-panel]').forEach(p => {
+        p.classList.toggle('hidden', p.getAttribute('data-show-panel') !== slug);
+      });
+    }
 
     async function doSearch() {
       const q = qInput.value.trim();
@@ -98,15 +194,18 @@
       const r = await fetch('/api/search?q=' + encodeURIComponent(q));
       const data = await r.json();
       render(data.episodes, q);
+      tabView.classList.add('hidden');
+      searchView.classList.remove('hidden');
     }
 
     function clearSearch() {
       qInput.value = '';
-      location.reload();
+      searchView.classList.add('hidden');
+      tabView.classList.remove('hidden');
     }
 
     function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
     function highlight(s, q) {
@@ -114,32 +213,59 @@
       return escapeHtml(s).replace(re, '<mark>$1</mark>');
     }
 
+    function matchBadge(m) {
+      const map = {
+        title: ['badge-primary', 'Titel/Show'],
+        summary: ['badge-info', 'Summary'],
+        content: ['badge-accent', 'Volltext'],
+      };
+      const [cls, label] = map[m] || ['badge-ghost', m || ''];
+      return `<span class="badge ${cls} badge-sm">${label}</span>`;
+    }
+
+    function formatBtns(ep) {
+      const f = ep.formats;
+      const rows = [
+        `<div class="flex gap-1 flex-wrap justify-end">
+          ${f.txt ? `<a class="btn btn-xs btn-primary" href="/download/${encodeURI(f.txt.rel)}">TXT · ${f.txt.size}</a>` : ''}
+          ${f.srt ? `<a class="btn btn-xs btn-secondary" href="/download/${encodeURI(f.srt.rel)}">SRT · ${f.srt.size}</a>` : ''}
+          ${f.json ? `<a class="btn btn-xs btn-accent" href="/download/${encodeURI(f.json.rel)}">JSON · ${f.json.size}</a>` : ''}
+        </div>`,
+        `<div class="flex gap-1 flex-wrap justify-end">
+          ${f.txt ? `<button class="btn btn-xs btn-outline btn-primary" onclick='preview(${JSON.stringify(f.txt.rel)}, ${JSON.stringify(ep.title + " · TXT")})'>TXT Vorschau</button>` : ''}
+          ${f.srt ? `<button class="btn btn-xs btn-outline btn-secondary" onclick='preview(${JSON.stringify(f.srt.rel)}, ${JSON.stringify(ep.title + " · SRT")})'>SRT Vorschau</button>` : ''}
+          ${f.json ? `<button class="btn btn-xs btn-outline btn-accent" onclick='preview(${JSON.stringify(f.json.rel)}, ${JSON.stringify(ep.title + " · JSON")})'>JSON Vorschau</button>` : ''}
+        </div>`,
+      ];
+      return rows.join('');
+    }
+
     function render(eps, q) {
-      count.textContent = eps.length + ' Treffer';
+      searchCount.textContent = eps.length;
+      searchTerm.textContent = q;
       if (!eps.length) {
-        list.innerHTML = '<div class="alert alert-warning"><span>Keine Treffer für „' + escapeHtml(q) + '".</span></div>';
+        searchResults.innerHTML = '<div class="alert alert-warning"><span>Keine Treffer.</span></div>';
         return;
       }
-      list.innerHTML = eps.map(ep => {
-        const txt = ep.formats.txt, srt = ep.formats.srt;
-        const snippet = ep.snippet ? `<div class="snippet text-sm mt-2 opacity-80">${highlight(ep.snippet, q)}</div>` : '';
-        const badge = ep.match === 'content'
-          ? '<span class="badge badge-accent badge-sm">Volltext</span>'
-          : '<span class="badge badge-primary badge-sm">Titel</span>';
+      searchResults.innerHTML = eps.map(ep => {
+        const snippet = ep.snippet ? `<p class="snippet text-sm mt-2 opacity-80">${highlight(ep.snippet, q)}</p>` : '';
+        const epnum = ep.episode_number ? `<span class="badge badge-accent">#${escapeHtml(ep.episode_number)}</span>` : '';
+        const meta = [ep.show, ep.date, ep.duration].filter(Boolean).map(escapeHtml).join(' · ');
         return `
           <div class="card bg-base-100 shadow-md">
             <div class="card-body">
               <div class="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <h3 class="card-title">${escapeHtml(ep.title)} ${badge}</h3>
-                  <div class="text-xs opacity-60">${ep.date}</div>
+                <div class="flex-1 min-w-[16rem]">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <h3 class="card-title">${escapeHtml(ep.title)}</h3>
+                    ${epnum}
+                    ${matchBadge(ep.match)}
+                  </div>
+                  <div class="text-xs opacity-70 mt-1">${meta}</div>
                   ${snippet}
                 </div>
-                <div class="flex gap-2 flex-wrap">
-                  ${txt ? `<a class="btn btn-sm btn-primary" href="/download/${txt.filename}">TXT · ${txt.size}</a>
-                           <button class="btn btn-sm btn-outline btn-primary" onclick='preview(${JSON.stringify(txt.filename)}, ${JSON.stringify(ep.title + " · TXT")})'>TXT Vorschau</button>` : ''}
-                  ${srt ? `<a class="btn btn-sm btn-secondary" href="/download/${srt.filename}">SRT · ${srt.size}</a>
-                           <button class="btn btn-sm btn-outline btn-secondary" onclick='preview(${JSON.stringify(srt.filename)}, ${JSON.stringify(ep.title + " · SRT")})'>SRT Vorschau</button>` : ''}
+                <div class="flex flex-col gap-2 shrink-0">
+                  ${formatBtns(ep)}
                 </div>
               </div>
             </div>
@@ -147,8 +273,8 @@
       }).join('');
     }
 
-    async function preview(filename, title) {
-      const r = await fetch('/preview/' + encodeURIComponent(filename));
+    async function preview(rel, title) {
+      const r = await fetch('/preview/' + rel.split('/').map(encodeURIComponent).join('/'));
       const t = await r.text();
       document.getElementById('preview_title').textContent = title;
       document.getElementById('preview_body').textContent = t;
