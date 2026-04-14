@@ -6,3 +6,5 @@ __pycache__/
 transcripts/
 podcasts/*
 !podcasts/.gitkeep
+
+.upload_token

@@ -1,11 +1,12 @@
 import json
 import re
+import secrets
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -19,7 +20,36 @@ BASE = Path(__file__).parent
 PODCASTS = BASE / "podcasts"
 PODCASTS.mkdir(exist_ok=True)
 
-app = FastAPI(title="Podcast Transcripts")
+UPLOAD_TOKEN_FILE = BASE / ".upload_token"
+MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_TOTAL_BYTES = 25 * 1024 * 1024
+
+
+def get_upload_token() -> str | None:
+    if not UPLOAD_TOKEN_FILE.exists():
+        return None
+    tok = UPLOAD_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    return tok or None
+
+
+app = FastAPI(
+    title="Podcast Transcripts",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    if request.url.path == "/upload" and request.method == "POST":
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > MAX_TOTAL_BYTES + 64 * 1024:
+            return PlainTextResponse(
+                f"Request body exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB limit",
+                status_code=413,
+            )
+    return await call_next(request)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
@@ -146,8 +176,30 @@ async def upload(
     json_file: UploadFile = File(...),
     txt_file: UploadFile = File(...),
     srt_file: UploadFile = File(...),
+    upload_token: str = Form(""),
 ):
+    expected = get_upload_token()
+    if not expected:
+        raise HTTPException(503, "Upload disabled: no server token configured")
+    if not secrets.compare_digest(upload_token, expected):
+        raise HTTPException(401, "Invalid upload token")
+
     json_bytes = await json_file.read()
+    txt_bytes = await txt_file.read()
+    srt_bytes = await srt_file.read()
+
+    for label, b in (("JSON", json_bytes), ("TXT", txt_bytes), ("SRT", srt_bytes)):
+        if len(b) > MAX_FILE_BYTES:
+            raise HTTPException(
+                413,
+                f"{label} file exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB limit",
+            )
+    if len(json_bytes) + len(txt_bytes) + len(srt_bytes) > MAX_TOTAL_BYTES:
+        raise HTTPException(
+            413,
+            f"Total upload exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB limit",
+        )
+
     try:
         meta = json.loads(json_bytes.decode("utf-8"))
     except Exception as e:
@@ -156,6 +208,7 @@ async def upload(
     title = meta.get("title")
     if not show or not title:
         raise HTTPException(400, "JSON must contain 'podcast' and 'title'")
+
     date_str = parse_date(meta.get("date") or "")
     show_slug = slugify(show)
     title_slug = slugify(title)
@@ -164,8 +217,8 @@ async def upload(
     ep_dir = PODCASTS / show_slug / title_slug
     ep_dir.mkdir(parents=True, exist_ok=True)
     (ep_dir / f"{stem}.json").write_bytes(json_bytes)
-    (ep_dir / f"{stem}.txt").write_bytes(await txt_file.read())
-    (ep_dir / f"{stem}.srt").write_bytes(await srt_file.read())
+    (ep_dir / f"{stem}.txt").write_bytes(txt_bytes)
+    (ep_dir / f"{stem}.srt").write_bytes(srt_bytes)
     return RedirectResponse("/", status_code=303)
 
 

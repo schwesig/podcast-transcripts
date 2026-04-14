@@ -151,6 +151,15 @@
           <div class="label"><span class="label-text">SRT (Untertitel)</span></div>
           <input type="file" name="srt_file" accept=".srt" required class="file-input file-input-bordered w-full" />
         </label>
+        <label class="form-control w-full">
+          <div class="label">
+            <span class="label-text">Upload Token</span>
+            <span class="label-text-alt opacity-60">serverseitig gesetzt</span>
+          </div>
+          <input type="password" name="upload_token" required autocomplete="off"
+                 class="input input-bordered w-full" placeholder="••••••••" />
+        </label>
+        <p class="text-xs opacity-60">Max. 10 MB pro Datei · 25 MB gesamt.</p>
         <div class="modal-action">
           <button type="button" class="btn btn-ghost" onclick="upload_modal.close()">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Hochladen</button>
