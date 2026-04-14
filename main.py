@@ -22,7 +22,7 @@ PODCASTS.mkdir(exist_ok=True)
 
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
-MAX_TOTAL_BYTES = 1024 * 1024
+MAX_TOTAL_BYTES = 10 * 1024 * 1024
 STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$")
 CTRL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 SRT_CUE_RE = re.compile(
@@ -72,21 +72,56 @@ def check_json_meta(meta) -> dict:
     return meta
 
 
-def validate_filename(upload: UploadFile, expected_ext: str) -> str:
+def classify_upload(upload: UploadFile) -> tuple[str, str]:
     name = (upload.filename or "").strip()
     if not name:
-        raise HTTPException(400, f"{expected_ext.upper()} file has no name")
+        raise ValueError("empty filename")
     if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(400, f"{expected_ext.upper()} filename contains path separators")
+        raise ValueError("filename contains path separators")
     base, _, ext = name.rpartition(".")
-    if not base or ext.lower() != expected_ext:
-        raise HTTPException(400, f"{name}: expected .{expected_ext} extension")
+    ext = ext.lower()
+    if not base or ext not in ("json", "txt", "srt"):
+        raise ValueError("unsupported extension, expected .json .txt or .srt")
     if not STEM_RE.match(base):
-        raise HTTPException(
-            400,
-            f"{name}: stem must match YYYY-MM-DD_slug-with-hyphens (got '{base}')",
-        )
-    return base
+        raise ValueError(f"stem must match YYYY-MM-DD_slug (got '{base}')")
+    return base, ext
+
+
+def process_episode_trio(
+    stem: str,
+    json_bytes: bytes,
+    txt_bytes: bytes,
+    srt_bytes: bytes,
+) -> tuple[str, str]:
+    for label, b in (("JSON", json_bytes), ("TXT", txt_bytes), ("SRT", srt_bytes)):
+        if len(b) > MAX_FILE_BYTES:
+            raise HTTPException(413, f"{label} file exceeds {_mb(MAX_FILE_BYTES)} limit")
+
+    try:
+        json_text = json_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "JSON file is not valid UTF-8")
+    try:
+        meta = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"JSON parse error: {e.msg} (line {e.lineno})")
+    meta = check_json_meta(meta)
+    show = meta["podcast"]
+    title = meta["title"]
+
+    check_text_blob("TXT", txt_bytes)
+    srt_text = check_text_blob("SRT", srt_bytes)
+    if not SRT_CUE_RE.search(srt_text):
+        raise HTTPException(400, "SRT: does not look like SubRip (no valid cue found)")
+
+    show_slug = slugify(show)
+    title_slug = slugify(title)
+    ep_dir = PODCASTS / show_slug / title_slug
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    (ep_dir / f"{stem}.json").write_bytes(json_bytes)
+    (ep_dir / f"{stem}.txt").write_bytes(txt_bytes)
+    (ep_dir / f"{stem}.srt").write_bytes(srt_bytes)
+    return show, title
 
 
 def _mb(n: int) -> str:
@@ -239,11 +274,10 @@ def index(request: Request):
     )
 
 
-@app.post("/upload")
+@app.post("/upload", response_class=HTMLResponse)
 async def upload(
-    json_file: UploadFile = File(...),
-    txt_file: UploadFile = File(...),
-    srt_file: UploadFile = File(...),
+    request: Request,
+    files: list[UploadFile] = File(...),
     upload_token: str = Form(""),
 ):
     expected = get_upload_token()
@@ -251,54 +285,49 @@ async def upload(
         raise HTTPException(503, "Upload disabled: no server token configured")
     if not secrets.compare_digest(upload_token, expected):
         raise HTTPException(401, "Invalid upload token")
+    if not files:
+        raise HTTPException(400, "No files provided")
 
-    json_base = validate_filename(json_file, "json")
-    txt_base = validate_filename(txt_file, "txt")
-    srt_base = validate_filename(srt_file, "srt")
-    if not (json_base == txt_base == srt_base):
-        raise HTTPException(
-            400,
-            f"Filenames must share one stem: json={json_base}, txt={txt_base}, srt={srt_base}",
-        )
+    groups: dict[str, dict[str, UploadFile]] = {}
+    errors: list[dict] = []
 
-    json_bytes = await json_file.read()
-    txt_bytes = await txt_file.read()
-    srt_bytes = await srt_file.read()
+    for f in files:
+        raw_name = (f.filename or "").strip() or "<empty>"
+        try:
+            base, ext = classify_upload(f)
+        except ValueError as e:
+            errors.append({"file": raw_name, "error": str(e)})
+            continue
+        grp = groups.setdefault(base, {})
+        if ext in grp:
+            errors.append({"file": raw_name, "error": f"duplicate .{ext} for stem {base}"})
+            continue
+        grp[ext] = f
 
-    for label, b in (("JSON", json_bytes), ("TXT", txt_bytes), ("SRT", srt_bytes)):
-        if len(b) > MAX_FILE_BYTES:
-            raise HTTPException(413, f"{label} file exceeds {_mb(MAX_FILE_BYTES)} limit")
-    if len(json_bytes) + len(txt_bytes) + len(srt_bytes) > MAX_TOTAL_BYTES:
-        raise HTTPException(413, f"Total upload exceeds {_mb(MAX_TOTAL_BYTES)} limit")
+    successes: list[dict] = []
+    for stem, trio in groups.items():
+        missing = {"json", "txt", "srt"} - set(trio.keys())
+        if missing:
+            errors.append(
+                {"file": stem, "error": f"incomplete trio, missing: {', '.join(sorted(missing))}"}
+            )
+            continue
+        try:
+            json_bytes = await trio["json"].read()
+            txt_bytes = await trio["txt"].read()
+            srt_bytes = await trio["srt"].read()
+            show, title = process_episode_trio(stem, json_bytes, txt_bytes, srt_bytes)
+            successes.append({"stem": stem, "show": show, "title": title})
+        except HTTPException as e:
+            errors.append({"file": stem, "error": str(e.detail)})
+        except Exception as e:
+            errors.append({"file": stem, "error": f"{type(e).__name__}: {e}"})
 
-    try:
-        json_text = json_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, "JSON file is not valid UTF-8")
-    try:
-        meta = json.loads(json_text)
-    except json.JSONDecodeError as e:
-        raise HTTPException(400, f"JSON parse error: {e.msg} (line {e.lineno})")
-    meta = check_json_meta(meta)
-    show = meta["podcast"]
-    title = meta["title"]
-
-    txt_text = check_text_blob("TXT", txt_bytes)
-    srt_text = check_text_blob("SRT", srt_bytes)
-    if not SRT_CUE_RE.search(srt_text):
-        raise HTTPException(400, "SRT: does not look like SubRip (no valid cue found)")
-
-    date_str = parse_date(meta.get("date") or "")
-    show_slug = slugify(show)
-    title_slug = slugify(title)
-    stem_date = date_str or datetime.now().strftime("%Y-%m-%d")
-    stem = f"{stem_date}_{title_slug}"
-    ep_dir = PODCASTS / show_slug / title_slug
-    ep_dir.mkdir(parents=True, exist_ok=True)
-    (ep_dir / f"{stem}.json").write_bytes(json_bytes)
-    (ep_dir / f"{stem}.txt").write_bytes(txt_bytes)
-    (ep_dir / f"{stem}.srt").write_bytes(srt_bytes)
-    return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "upload_result.html",
+        {"successes": successes, "errors": errors},
+    )
 
 
 @app.get("/download/{rel:path}")

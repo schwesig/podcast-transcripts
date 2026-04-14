@@ -140,16 +140,16 @@
       <p class="text-sm opacity-70 mb-4">Drei Dateien einer Episode: <code>JSON</code>, <code>TXT</code>, <code>SRT</code>. Show & Titel werden aus dem JSON gelesen.</p>
       <form action="/upload" method="post" enctype="multipart/form-data" class="space-y-3">
         <label class="form-control w-full">
-          <div class="label"><span class="label-text">JSON (Metadata)</span></div>
-          <input type="file" name="json_file" accept=".json,application/json" required class="file-input file-input-bordered w-full" />
-        </label>
-        <label class="form-control w-full">
-          <div class="label"><span class="label-text">TXT (Transkript)</span></div>
-          <input type="file" name="txt_file" accept=".txt,text/plain" required class="file-input file-input-bordered w-full" />
-        </label>
-        <label class="form-control w-full">
-          <div class="label"><span class="label-text">SRT (Untertitel)</span></div>
-          <input type="file" name="srt_file" accept=".srt" required class="file-input file-input-bordered w-full" />
+          <div class="label">
+            <span class="label-text">Episodendateien</span>
+            <span class="label-text-alt opacity-60">JSON + TXT + SRT, mehrere Episoden ok</span>
+          </div>
+          <input type="file" name="files" multiple required
+                 accept=".json,.txt,.srt,application/json,text/plain"
+                 class="file-input file-input-bordered w-full" />
+          <div class="label"><span class="label-text-alt opacity-60">
+            Dateien werden nach Dateinamen-Stamm zu Episoden gruppiert. Jede Episode braucht alle drei Formate mit identischem Stamm (z.B. <code>2024-01-15_my-episode.json/.txt/.srt</code>).
+          </span></div>
         </label>
         <label class="form-control w-full">
           <div class="label">
@@ -159,7 +159,7 @@
           <input type="password" name="upload_token" required autocomplete="off"
                  class="input input-bordered w-full" placeholder="••••••••" />
         </label>
-        <p class="text-xs opacity-60">Max. 0,2 MB pro Datei · 1 MB gesamt.</p>
+        <p class="text-xs opacity-60">Max. 0,2 MB pro Datei · 10 MB pro Batch.</p>
         <div class="modal-action">
           <button type="button" class="btn btn-ghost" onclick="upload_modal.close()">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Hochladen</button>
