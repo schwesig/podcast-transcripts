@@ -8,3 +8,4 @@ podcasts/*
 !podcasts/.gitkeep
 
 .upload_token
+.pending/

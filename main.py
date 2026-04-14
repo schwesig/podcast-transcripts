@@ -1,6 +1,9 @@
 import json
 import re
 import secrets
+import shutil
+import time
+import uuid
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -19,10 +22,14 @@ from fastapi.templating import Jinja2Templates
 BASE = Path(__file__).parent
 PODCASTS = BASE / "podcasts"
 PODCASTS.mkdir(exist_ok=True)
+PENDING = BASE / ".pending"
+PENDING.mkdir(exist_ok=True)
 
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
+PENDING_TTL_SECONDS = 3600
+UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$")
 CTRL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 SRT_CUE_RE = re.compile(
@@ -87,8 +94,7 @@ def classify_upload(upload: UploadFile) -> tuple[str, str]:
     return base, ext
 
 
-def process_episode_trio(
-    stem: str,
+def validate_episode_trio(
     json_bytes: bytes,
     txt_bytes: bytes,
     srt_bytes: bytes,
@@ -106,22 +112,70 @@ def process_episode_trio(
     except json.JSONDecodeError as e:
         raise HTTPException(400, f"JSON parse error: {e.msg} (line {e.lineno})")
     meta = check_json_meta(meta)
-    show = meta["podcast"]
-    title = meta["title"]
 
     check_text_blob("TXT", txt_bytes)
     srt_text = check_text_blob("SRT", srt_bytes)
     if not SRT_CUE_RE.search(srt_text):
         raise HTTPException(400, "SRT: does not look like SubRip (no valid cue found)")
 
-    show_slug = slugify(show)
-    title_slug = slugify(title)
-    ep_dir = PODCASTS / show_slug / title_slug
+    return meta["podcast"], meta["title"]
+
+
+def episode_dir(show: str, title: str) -> Path:
+    return PODCASTS / slugify(show) / slugify(title)
+
+
+def episode_exists(show: str, title: str, stem: str) -> bool:
+    ep_dir = episode_dir(show, title)
+    if not ep_dir.exists():
+        return False
+    return any((ep_dir / f"{stem}.{ext}").exists() for ext in ("json", "txt", "srt"))
+
+
+def save_episode(
+    stem: str,
+    show: str,
+    title: str,
+    json_bytes: bytes,
+    txt_bytes: bytes,
+    srt_bytes: bytes,
+) -> None:
+    ep_dir = episode_dir(show, title)
     ep_dir.mkdir(parents=True, exist_ok=True)
     (ep_dir / f"{stem}.json").write_bytes(json_bytes)
     (ep_dir / f"{stem}.txt").write_bytes(txt_bytes)
     (ep_dir / f"{stem}.srt").write_bytes(srt_bytes)
-    return show, title
+
+
+def stash_pending(
+    uid: str,
+    stem: str,
+    show: str,
+    title: str,
+    json_bytes: bytes,
+    txt_bytes: bytes,
+    srt_bytes: bytes,
+) -> None:
+    pdir = PENDING / uid
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / f"{stem}.json").write_bytes(json_bytes)
+    (pdir / f"{stem}.txt").write_bytes(txt_bytes)
+    (pdir / f"{stem}.srt").write_bytes(srt_bytes)
+    (pdir / f"{stem}.meta").write_text(
+        json.dumps({"show": show, "title": title}), encoding="utf-8"
+    )
+
+
+def cleanup_pending() -> None:
+    cutoff = time.time() - PENDING_TTL_SECONDS
+    if not PENDING.exists():
+        return
+    for child in PENDING.iterdir():
+        try:
+            if child.is_dir() and child.stat().st_mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+        except FileNotFoundError:
+            continue
 
 
 def _mb(n: int) -> str:
@@ -288,6 +342,8 @@ async def upload(
     if not files:
         raise HTTPException(400, "No files provided")
 
+    cleanup_pending()
+
     groups: dict[str, dict[str, UploadFile]] = {}
     errors: list[dict] = []
 
@@ -305,6 +361,9 @@ async def upload(
         grp[ext] = f
 
     successes: list[dict] = []
+    pending: list[dict] = []
+    upload_id = uuid.uuid4().hex
+
     for stem, trio in groups.items():
         missing = {"json", "txt", "srt"} - set(trio.keys())
         if missing:
@@ -316,17 +375,88 @@ async def upload(
             json_bytes = await trio["json"].read()
             txt_bytes = await trio["txt"].read()
             srt_bytes = await trio["srt"].read()
-            show, title = process_episode_trio(stem, json_bytes, txt_bytes, srt_bytes)
-            successes.append({"stem": stem, "show": show, "title": title})
+            show, title = validate_episode_trio(json_bytes, txt_bytes, srt_bytes)
+            if episode_exists(show, title, stem):
+                stash_pending(upload_id, stem, show, title, json_bytes, txt_bytes, srt_bytes)
+                pending.append({"stem": stem, "show": show, "title": title})
+            else:
+                save_episode(stem, show, title, json_bytes, txt_bytes, srt_bytes)
+                successes.append({"stem": stem, "show": show, "title": title})
         except HTTPException as e:
             errors.append({"file": stem, "error": str(e.detail)})
         except Exception as e:
             errors.append({"file": stem, "error": f"{type(e).__name__}: {e}"})
 
+    if not pending:
+        upload_id = ""
+
     return templates.TemplateResponse(
         request,
         "upload_result.html",
-        {"successes": successes, "errors": errors},
+        {
+            "successes": successes,
+            "errors": errors,
+            "pending": pending,
+            "ignored": [],
+            "upload_id": upload_id,
+        },
+    )
+
+
+@app.post("/upload/resolve", response_class=HTMLResponse)
+async def upload_resolve(request: Request):
+    form = await request.form()
+    expected = get_upload_token()
+    if not expected:
+        raise HTTPException(503, "Upload disabled: no server token configured")
+    token = str(form.get("upload_token", ""))
+    if not secrets.compare_digest(token, expected):
+        raise HTTPException(401, "Invalid upload token")
+    upload_id = str(form.get("upload_id", ""))
+    if not UPLOAD_ID_RE.match(upload_id):
+        raise HTTPException(400, "Invalid upload_id")
+    pdir = PENDING / upload_id
+    if not pdir.is_dir():
+        raise HTTPException(404, "Pending upload not found or expired")
+
+    successes: list[dict] = []
+    ignored: list[dict] = []
+    errors: list[dict] = []
+
+    for meta_file in sorted(pdir.glob("*.meta")):
+        stem = meta_file.stem
+        try:
+            info = json.loads(meta_file.read_text(encoding="utf-8"))
+            show = info["show"]
+            title = info["title"]
+        except Exception as e:
+            errors.append({"file": stem, "error": f"pending meta unreadable: {e}"})
+            continue
+        decision = str(form.get(f"decision_{stem}", "ignore"))
+        if decision == "replace":
+            try:
+                json_bytes = (pdir / f"{stem}.json").read_bytes()
+                txt_bytes = (pdir / f"{stem}.txt").read_bytes()
+                srt_bytes = (pdir / f"{stem}.srt").read_bytes()
+                save_episode(stem, show, title, json_bytes, txt_bytes, srt_bytes)
+                successes.append({"stem": stem, "show": show, "title": title})
+            except Exception as e:
+                errors.append({"file": stem, "error": f"{type(e).__name__}: {e}"})
+        else:
+            ignored.append({"stem": stem, "show": show, "title": title})
+
+    shutil.rmtree(pdir, ignore_errors=True)
+
+    return templates.TemplateResponse(
+        request,
+        "upload_result.html",
+        {
+            "successes": successes,
+            "errors": errors,
+            "pending": [],
+            "ignored": ignored,
+            "upload_id": "",
+        },
     )
 
 

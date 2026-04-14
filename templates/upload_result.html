@@ -19,14 +19,61 @@
 
     <div class="stats bg-base-100 shadow w-full">
       <div class="stat">
-        <div class="stat-title">Erfolgreich</div>
+        <div class="stat-title">Gespeichert</div>
         <div class="stat-value text-success">{{ successes|length }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Ignoriert</div>
+        <div class="stat-value {{ 'text-info' if ignored else 'text-base-content/40' }}">{{ ignored|length }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Konflikte</div>
+        <div class="stat-value {{ 'text-warning' if pending else 'text-base-content/40' }}">{{ pending|length }}</div>
       </div>
       <div class="stat">
         <div class="stat-title">Fehler</div>
         <div class="stat-value {{ 'text-error' if errors else 'text-base-content/40' }}">{{ errors|length }}</div>
       </div>
     </div>
+
+    {% if pending %}
+    <div class="card bg-base-100 shadow border border-warning">
+      <div class="card-body">
+        <h2 class="card-title text-warning">Episode existiert bereits — Entscheidung nötig</h2>
+        <p class="text-sm opacity-70">Wähle pro Episode ob die bestehende Datei ersetzt oder die Hochladung verworfen wird.</p>
+        <form action="/upload/resolve" method="post" class="space-y-4 mt-2">
+          <input type="hidden" name="upload_id" value="{{ upload_id }}" />
+          <ul class="divide-y divide-base-300">
+            {% for p in pending %}
+            <li class="py-3">
+              <div class="font-medium">{{ p.title }}</div>
+              <div class="text-xs opacity-70">{{ p.show }} · <code>{{ p.stem }}</code></div>
+              <div class="mt-2 flex gap-4 flex-wrap">
+                <label class="label cursor-pointer gap-2 py-0">
+                  <input type="radio" name="decision_{{ p.stem }}" value="ignore" class="radio radio-sm" checked />
+                  <span class="label-text">Ignorieren</span>
+                </label>
+                <label class="label cursor-pointer gap-2 py-0">
+                  <input type="radio" name="decision_{{ p.stem }}" value="replace" class="radio radio-sm radio-warning" />
+                  <span class="label-text">Ersetzen</span>
+                </label>
+              </div>
+            </li>
+            {% endfor %}
+          </ul>
+          <div class="flex gap-2 justify-end">
+            <button type="button" class="btn btn-sm btn-ghost" onclick="document.querySelectorAll('input[type=radio][value=ignore]').forEach(r=>r.checked=true)">Alle ignorieren</button>
+            <button type="button" class="btn btn-sm btn-ghost" onclick="document.querySelectorAll('input[type=radio][value=replace]').forEach(r=>r.checked=true)">Alle ersetzen</button>
+          </div>
+          <label class="form-control">
+            <div class="label"><span class="label-text">Upload Token (Bestätigung)</span></div>
+            <input type="password" name="upload_token" required autocomplete="off" class="input input-bordered" placeholder="••••••••" />
+          </label>
+          <button type="submit" class="btn btn-warning">Entscheidungen anwenden</button>
+        </form>
+      </div>
+    </div>
+    {% endif %}
 
     {% if successes %}
     <div class="card bg-base-100 shadow">
@@ -37,6 +84,22 @@
           <li class="py-2">
             <div class="font-medium">{{ s.title }}</div>
             <div class="text-xs opacity-70">{{ s.show }} · <code>{{ s.stem }}</code></div>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if ignored %}
+    <div class="card bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-info">Ignoriert (Bestand behalten)</h2>
+        <ul class="divide-y divide-base-300">
+          {% for i in ignored %}
+          <li class="py-2">
+            <div class="font-medium">{{ i.title }}</div>
+            <div class="text-xs opacity-70">{{ i.show }} · <code>{{ i.stem }}</code></div>
           </li>
           {% endfor %}
         </ul>
@@ -60,7 +123,7 @@
     </div>
     {% endif %}
 
-    <a href="/" class="btn btn-primary">Zurück</a>
+    <a href="/" class="btn btn-primary">Zurück zur Übersicht</a>
   </main>
 </body>
 </html>
