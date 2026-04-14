@@ -51,13 +51,70 @@ python3 -m venv .venv
 .venv/bin/pip install fastapi uvicorn jinja2 python-multipart
 ```
 
-## Run
+## Run (local)
 
 ```bash
 .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8080
 ```
 
 Then open `http://localhost:8080/`.
+
+## Run on sprites.dev
+
+On a sprite, do **not** run `uvicorn` in a shell — the process dies
+when the session ends and the sprite HTTP proxy has nothing to route
+to. Register it as a managed service instead, so it persists across
+reboots and the public URL (`https://<name>-<org>.sprites.app`) maps
+to port 8080 automatically.
+
+```bash
+cd ~
+git clone https://github.com/schwesig/podcast-transcripts.git
+cd podcast-transcripts
+
+python3 -m venv .venv
+.venv/bin/pip install fastapi uvicorn jinja2 python-multipart
+
+# upload token (never commit)
+python3 -c "import secrets; print(secrets.token_urlsafe(32))" > .upload_token
+chmod 600 .upload_token
+
+sprite-env services create podcast \
+  --cmd "$HOME/podcast-transcripts/.venv/bin/uvicorn" \
+  --args "main:app,--host,0.0.0.0,--port,8080,--app-dir,$HOME/podcast-transcripts" \
+  --http-port 8080
+```
+
+Notes:
+
+- `--cmd` takes only the binary path; all arguments go in `--args` as a
+  comma-separated list.
+- `--app-dir` is required because the service runs from an arbitrary
+  working directory, and uvicorn needs to know where `main.py` lives.
+- Only one service per sprite can own `--http-port`; the sprite proxy
+  forwards inbound requests to it and auto-starts the process on demand.
+
+### Manage the service
+
+```bash
+sprite-env services list
+sprite-env services restart podcast
+sprite-env services logs podcast
+sprite-env services delete podcast
+```
+
+### Make the URL public
+
+By default the sprite URL requires organization auth. To open it to the
+internet (from your host, not inside the sprite):
+
+```bash
+sprite url update --auth public
+```
+
+Revert with `sprite url update --auth default`. Confirm the upload token
+is set first — a public sprite with no `.upload_token` lets anyone POST
+arbitrary files up to the configured size caps.
 
 ## Upload Token
 
