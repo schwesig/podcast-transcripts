@@ -81,7 +81,8 @@ chmod 600 .upload_token
 
 sprite-env services create podcast \
   --cmd "$HOME/podcast-transcripts/.venv/bin/uvicorn" \
-  --args "main:app,--host,0.0.0.0,--port,8080,--app-dir,$HOME/podcast-transcripts" \
+  --args "main:app,--host,0.0.0.0,--port,8080" \
+  --dir "$HOME/podcast-transcripts" \
   --http-port 8080
 ```
 
@@ -89,8 +90,8 @@ Notes:
 
 - `--cmd` takes only the binary path; all arguments go in `--args` as a
   comma-separated list.
-- `--app-dir` is required because the service runs from an arbitrary
-  working directory, and uvicorn needs to know where `main.py` lives.
+- `--dir` sets the working directory for the process, so uvicorn can
+  import `main.py` by name without needing `--app-dir`.
 - Only one service per sprite can own `--http-port`; the sprite proxy
   forwards inbound requests to it and auto-starts the process on demand.
 
