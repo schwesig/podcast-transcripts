@@ -1,9 +1,0 @@
-Episode 02 — FastAPI deep dive.
-
-We explore routing, dependency injection, and the async story behind Starlette.
-FastAPI gives you type-checked handlers, automatic OpenAPI docs, and great performance.
-
-Show notes:
-- Pydantic v2 validation
-- Jinja2 templates for classic server-rendered pages
-- Deploying behind a reverse proxy
