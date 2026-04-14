@@ -21,8 +21,12 @@ PODCASTS = BASE / "podcasts"
 PODCASTS.mkdir(exist_ok=True)
 
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
-MAX_FILE_BYTES = 10 * 1024 * 1024
-MAX_TOTAL_BYTES = 25 * 1024 * 1024
+MAX_FILE_BYTES = 200 * 1024
+MAX_TOTAL_BYTES = 1024 * 1024
+
+
+def _mb(n: int) -> str:
+    return f"{n / (1024 * 1024):.2f} MB"
 
 
 def get_upload_token() -> str | None:
@@ -44,9 +48,9 @@ app = FastAPI(
 async def limit_body_size(request: Request, call_next):
     if request.url.path == "/upload" and request.method == "POST":
         cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > MAX_TOTAL_BYTES + 64 * 1024:
+        if cl and cl.isdigit() and int(cl) > MAX_TOTAL_BYTES + 16 * 1024:
             return PlainTextResponse(
-                f"Request body exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB limit",
+                f"Request body exceeds {_mb(MAX_TOTAL_BYTES)} limit",
                 status_code=413,
             )
     return await call_next(request)
@@ -190,15 +194,9 @@ async def upload(
 
     for label, b in (("JSON", json_bytes), ("TXT", txt_bytes), ("SRT", srt_bytes)):
         if len(b) > MAX_FILE_BYTES:
-            raise HTTPException(
-                413,
-                f"{label} file exceeds {MAX_FILE_BYTES // (1024 * 1024)} MB limit",
-            )
+            raise HTTPException(413, f"{label} file exceeds {_mb(MAX_FILE_BYTES)} limit")
     if len(json_bytes) + len(txt_bytes) + len(srt_bytes) > MAX_TOTAL_BYTES:
-        raise HTTPException(
-            413,
-            f"Total upload exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB limit",
-        )
+        raise HTTPException(413, f"Total upload exceeds {_mb(MAX_TOTAL_BYTES)} limit")
 
     try:
         meta = json.loads(json_bytes.decode("utf-8"))
