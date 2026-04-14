@@ -23,6 +23,24 @@ PODCASTS.mkdir(exist_ok=True)
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
+STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def validate_filename(upload: UploadFile, expected_ext: str) -> str:
+    name = (upload.filename or "").strip()
+    if not name:
+        raise HTTPException(400, f"{expected_ext.upper()} file has no name")
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, f"{expected_ext.upper()} filename contains path separators")
+    base, _, ext = name.rpartition(".")
+    if not base or ext.lower() != expected_ext:
+        raise HTTPException(400, f"{name}: expected .{expected_ext} extension")
+    if not STEM_RE.match(base):
+        raise HTTPException(
+            400,
+            f"{name}: stem must match YYYY-MM-DD_slug-with-hyphens (got '{base}')",
+        )
+    return base
 
 
 def _mb(n: int) -> str:
@@ -187,6 +205,15 @@ async def upload(
         raise HTTPException(503, "Upload disabled: no server token configured")
     if not secrets.compare_digest(upload_token, expected):
         raise HTTPException(401, "Invalid upload token")
+
+    json_base = validate_filename(json_file, "json")
+    txt_base = validate_filename(txt_file, "txt")
+    srt_base = validate_filename(srt_file, "srt")
+    if not (json_base == txt_base == srt_base):
+        raise HTTPException(
+            400,
+            f"Filenames must share one stem: json={json_base}, txt={txt_base}, srt={srt_base}",
+        )
 
     json_bytes = await json_file.read()
     txt_bytes = await txt_file.read()
