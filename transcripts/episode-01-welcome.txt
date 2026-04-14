@@ -1,0 +1,12 @@
+Welcome to Episode 01 of the Sprite Podcast.
+
+In this first episode we talk about lightweight development environments,
+why ephemeral VMs matter, and how to ship a static site in under five minutes.
+
+Topics covered:
+- What is Sprite
+- Checkpoints and snapshots
+- FastAPI as a tiny backend
+- Tailwind and DaisyUI for rich UIs without a build step
+
+Thanks for listening!

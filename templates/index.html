@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="de" data-theme="night">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Podcast Transkripte</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.14/dist/full.min.css" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .snippet mark { background: oklch(var(--p)); color: oklch(var(--pc)); padding: 0 2px; border-radius: 2px; }
+    pre.transcript { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+  </style>
+</head>
+<body class="min-h-screen bg-base-200">
+  <div class="navbar bg-base-100 shadow-lg sticky top-0 z-20">
+    <div class="flex-1">
+      <a class="btn btn-ghost text-xl">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M19 11a7 7 0 01-14 0m7 7v4m0-4a7 7 0 007-7m-7 7a7 7 0 01-7-7m7-4a3 3 0 00-3 3v4a3 3 0 006 0v-4a3 3 0 00-3-3z"/>
+        </svg>
+        Podcast Transkripte
+      </a>
+    </div>
+    <div class="flex-none gap-2">
+      <span class="badge badge-primary badge-outline" id="count">{{ episodes|length }} Episoden</span>
+    </div>
+  </div>
+
+  <main class="container mx-auto p-4 max-w-5xl">
+    <div class="card bg-base-100 shadow-xl mb-6">
+      <div class="card-body">
+        <h2 class="card-title">Suche</h2>
+        <p class="text-sm opacity-70">Suche in Titel oder Volltext der Transkripte.</p>
+        <div class="join w-full mt-2">
+          <input id="q" type="search" placeholder="Suchbegriff…"
+                 class="input input-bordered join-item w-full" />
+          <button class="btn btn-primary join-item" onclick="doSearch()">Suchen</button>
+          <button class="btn btn-ghost join-item" onclick="clearSearch()">Reset</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="list" class="grid gap-4">
+      {% for ep in episodes %}
+      <div class="card bg-base-100 shadow-md hover:shadow-xl transition-shadow" data-title="{{ ep.title|lower }}" data-stem="{{ ep.stem|lower }}">
+        <div class="card-body">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <h3 class="card-title">{{ ep.title }}</h3>
+              <div class="text-xs opacity-60">{{ ep.date }}</div>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              {% if ep.formats.txt %}
+              <a class="btn btn-sm btn-primary" href="/download/{{ ep.formats.txt.filename }}">
+                TXT · {{ ep.formats.txt.size }}
+              </a>
+              <button class="btn btn-sm btn-outline btn-primary" onclick="preview('{{ ep.formats.txt.filename }}', '{{ ep.title|e }} · TXT')">TXT Vorschau</button>
+              {% endif %}
+              {% if ep.formats.srt %}
+              <a class="btn btn-sm btn-secondary" href="/download/{{ ep.formats.srt.filename }}">
+                SRT · {{ ep.formats.srt.size }}
+              </a>
+              <button class="btn btn-sm btn-outline btn-secondary" onclick="preview('{{ ep.formats.srt.filename }}', '{{ ep.title|e }} · SRT')">SRT Vorschau</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="alert alert-info">
+        <span>Noch keine Transkripte. Lege <code>.txt</code> oder <code>.srt</code> Dateien in <code>transcripts/</code> ab.</span>
+      </div>
+      {% endfor %}
+    </div>
+  </main>
+
+  <dialog id="preview_modal" class="modal">
+    <div class="modal-box max-w-4xl">
+      <form method="dialog">
+        <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
+      </form>
+      <h3 id="preview_title" class="font-bold text-lg mb-2">Vorschau</h3>
+      <div class="divider my-1"></div>
+      <pre id="preview_body" class="transcript bg-base-200 rounded p-3 max-h-[70vh] overflow-auto"></pre>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  </dialog>
+
+  <script>
+    const qInput = document.getElementById('q');
+    const list = document.getElementById('list');
+    const count = document.getElementById('count');
+
+    async function doSearch() {
+      const q = qInput.value.trim();
+      if (!q) return clearSearch();
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const data = await r.json();
+      render(data.episodes, q);
+    }
+
+    function clearSearch() {
+      qInput.value = '';
+      location.reload();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function highlight(s, q) {
+      const re = new RegExp('(' + q.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + ')', 'gi');
+      return escapeHtml(s).replace(re, '<mark>$1</mark>');
+    }
+
+    function render(eps, q) {
+      count.textContent = eps.length + ' Treffer';
+      if (!eps.length) {
+        list.innerHTML = '<div class="alert alert-warning"><span>Keine Treffer für „' + escapeHtml(q) + '".</span></div>';
+        return;
+      }
+      list.innerHTML = eps.map(ep => {
+        const txt = ep.formats.txt, srt = ep.formats.srt;
+        const snippet = ep.snippet ? `<div class="snippet text-sm mt-2 opacity-80">${highlight(ep.snippet, q)}</div>` : '';
+        const badge = ep.match === 'content'
+          ? '<span class="badge badge-accent badge-sm">Volltext</span>'
+          : '<span class="badge badge-primary badge-sm">Titel</span>';
+        return `
+          <div class="card bg-base-100 shadow-md">
+            <div class="card-body">
+              <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <h3 class="card-title">${escapeHtml(ep.title)} ${badge}</h3>
+                  <div class="text-xs opacity-60">${ep.date}</div>
+                  ${snippet}
+                </div>
+                <div class="flex gap-2 flex-wrap">
+                  ${txt ? `<a class="btn btn-sm btn-primary" href="/download/${txt.filename}">TXT · ${txt.size}</a>
+                           <button class="btn btn-sm btn-outline btn-primary" onclick='preview(${JSON.stringify(txt.filename)}, ${JSON.stringify(ep.title + " · TXT")})'>TXT Vorschau</button>` : ''}
+                  ${srt ? `<a class="btn btn-sm btn-secondary" href="/download/${srt.filename}">SRT · ${srt.size}</a>
+                           <button class="btn btn-sm btn-outline btn-secondary" onclick='preview(${JSON.stringify(srt.filename)}, ${JSON.stringify(ep.title + " · SRT")})'>SRT Vorschau</button>` : ''}
+                </div>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    async function preview(filename, title) {
+      const r = await fetch('/preview/' + encodeURIComponent(filename));
+      const t = await r.text();
+      document.getElementById('preview_title').textContent = title;
+      document.getElementById('preview_body').textContent = t;
+      document.getElementById('preview_modal').showModal();
+    }
+
+    qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  </script>
+</body>
+</html>
