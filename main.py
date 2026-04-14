@@ -24,6 +24,52 @@ UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$")
+CTRL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+SRT_CUE_RE = re.compile(
+    r"^\s*\d+\s*\r?\n\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}",
+    re.MULTILINE,
+)
+MAX_STRING_FIELD = 50_000
+REQUIRED_META = ("podcast", "title")
+OPTIONAL_STRING_META = (
+    "episode_number",
+    "date",
+    "duration",
+    "summary",
+    "shownotes",
+)
+
+
+def check_text_blob(label: str, data: bytes) -> str:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, f"{label}: not valid UTF-8")
+    if CTRL_CHAR_RE.search(text):
+        raise HTTPException(400, f"{label}: contains forbidden control characters")
+    return text
+
+
+def check_json_meta(meta) -> dict:
+    if not isinstance(meta, dict):
+        raise HTTPException(400, "JSON root must be an object")
+    for k in REQUIRED_META:
+        v = meta.get(k)
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(400, f"JSON field '{k}' must be a non-empty string")
+        if len(v) > 500:
+            raise HTTPException(400, f"JSON field '{k}' too long (max 500 chars)")
+    for k in OPTIONAL_STRING_META:
+        v = meta.get(k)
+        if v is None:
+            continue
+        if isinstance(v, int):
+            continue
+        if not isinstance(v, str):
+            raise HTTPException(400, f"JSON field '{k}' must be a string")
+        if len(v) > MAX_STRING_FIELD:
+            raise HTTPException(400, f"JSON field '{k}' too long")
+    return meta
 
 
 def validate_filename(upload: UploadFile, expected_ext: str) -> str:
@@ -226,13 +272,21 @@ async def upload(
         raise HTTPException(413, f"Total upload exceeds {_mb(MAX_TOTAL_BYTES)} limit")
 
     try:
-        meta = json.loads(json_bytes.decode("utf-8"))
-    except Exception as e:
-        raise HTTPException(400, f"JSON parse error: {e}")
-    show = meta.get("podcast")
-    title = meta.get("title")
-    if not show or not title:
-        raise HTTPException(400, "JSON must contain 'podcast' and 'title'")
+        json_text = json_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "JSON file is not valid UTF-8")
+    try:
+        meta = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"JSON parse error: {e.msg} (line {e.lineno})")
+    meta = check_json_meta(meta)
+    show = meta["podcast"]
+    title = meta["title"]
+
+    txt_text = check_text_blob("TXT", txt_bytes)
+    srt_text = check_text_blob("SRT", srt_bytes)
+    if not SRT_CUE_RE.search(srt_text):
+        raise HTTPException(400, "SRT: does not look like SubRip (no valid cue found)")
 
     date_str = parse_date(meta.get("date") or "")
     show_slug = slugify(show)
