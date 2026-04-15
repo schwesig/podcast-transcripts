@@ -417,9 +417,19 @@ async def upload_resolve(request: Request):
     upload_id = str(form.get("upload_id", ""))
     if not UPLOAD_ID_RE.match(upload_id):
         raise HTTPException(400, "Invalid upload_id")
+
+    cleanup_pending()
+
     pdir = PENDING / upload_id
     if not pdir.is_dir():
         raise HTTPException(404, "Pending upload not found or expired")
+    try:
+        pdir_mtime = pdir.stat().st_mtime
+    except FileNotFoundError:
+        raise HTTPException(404, "Pending upload not found or expired")
+    if time.time() - pdir_mtime > PENDING_TTL_SECONDS:
+        shutil.rmtree(pdir, ignore_errors=True)
+        raise HTTPException(410, "Pending upload expired")
 
     successes: list[dict] = []
     ignored: list[dict] = []
