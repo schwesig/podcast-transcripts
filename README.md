@@ -183,9 +183,19 @@ Regex: `^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$`
 ## Upload flow
 
 1. Click **+ Upload** in the navbar.
-2. Select all files for one or many episodes (JSON + TXT + SRT per episode).
-3. Paste the upload token.
-4. Submit. The server:
+2. Either pick individual files (JSON + TXT + SRT per episode) **or**
+   pick a whole folder. The folder input uses `webkitdirectory`, so
+   the browser walks it recursively. The client keeps only
+   `.json/.txt/.srt` files and ignores everything else.
+3. Paste the upload token and click **Vorschau**. The client sends
+   the flat list of basenames to `POST /upload/plan`, which returns
+   three buckets using the exact same filename rule the real upload
+   enforces:
+   - **Bereit zum Upload** — complete trios ready to send
+   - **Unvollständig** — stems missing one or two of JSON/TXT/SRT
+   - **Nicht erkannt** — names that don't match the convention
+4. Confirm with **Ja, hochladen**. Only the files belonging to
+   complete trios are POSTed to `/upload`. The server then:
    - groups files by stem,
    - validates filenames, sizes, UTF-8, JSON schema, SRT format,
    - saves clean episodes that do not collide with existing ones,

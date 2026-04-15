@@ -137,34 +137,61 @@
         <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
       </form>
       <h3 class="font-bold text-lg mb-2">Episode hochladen</h3>
-      <p class="text-sm opacity-70 mb-4">Drei Dateien einer Episode: <code>JSON</code>, <code>TXT</code>, <code>SRT</code>. Show & Titel werden aus dem JSON gelesen.</p>
-      <form action="/upload" method="post" enctype="multipart/form-data" class="space-y-3">
+      <p class="text-sm opacity-70 mb-4">
+        Einzeldateien (<code>JSON</code> + <code>TXT</code> + <code>SRT</code>) oder einen ganzen Ordner wählen. Ordner werden rekursiv durchsucht, aber nur passend benannte <code>.json/.txt/.srt</code>-Dateien werden aufgenommen. Am Ende folgt eine Bestätigung.
+      </p>
+
+      <div id="upload_pick" class="space-y-3">
         <label class="form-control w-full">
           <div class="label">
-            <span class="label-text">Episodendateien</span>
+            <span class="label-text">Einzeldateien</span>
             <span class="label-text-alt opacity-60">JSON + TXT + SRT, mehrere Episoden ok</span>
           </div>
-          <input type="file" name="files" multiple required
+          <input type="file" id="upload_files_input" multiple
                  accept=".json,.txt,.srt,application/json,text/plain"
                  class="file-input file-input-bordered w-full" />
+        </label>
+
+        <div class="divider text-xs opacity-60 my-1">oder</div>
+
+        <label class="form-control w-full">
+          <div class="label">
+            <span class="label-text">Ordner (rekursiv)</span>
+            <span class="label-text-alt opacity-60">nur .json/.txt/.srt mit passendem Namen</span>
+          </div>
+          <input type="file" id="upload_folder_input" multiple webkitdirectory directory
+                 class="file-input file-input-bordered w-full" />
           <div class="label"><span class="label-text-alt opacity-60">
-            Dateien werden nach Dateinamen-Stamm zu Episoden gruppiert. Jede Episode braucht alle drei Formate mit identischem Stamm (z.B. <code>2024-01-15_my-episode.json/.txt/.srt</code>).
+            Benennung: <code>YYYY-MM-DD_slug.json/.txt/.srt</code>. Alles andere wird ignoriert und in der Vorschau aufgelistet.
           </span></div>
         </label>
+
         <label class="form-control w-full">
           <div class="label">
             <span class="label-text">Upload Token</span>
             <span class="label-text-alt opacity-60">serverseitig gesetzt</span>
           </div>
-          <input type="password" name="upload_token" required autocomplete="off"
+          <input type="password" id="upload_token_input" required autocomplete="off"
                  class="input input-bordered w-full" placeholder="••••••••" />
         </label>
+
         <p class="text-xs opacity-60">Max. 0,2 MB pro Datei · 10 MB pro Batch.</p>
+
+        <div id="upload_error" class="alert alert-error hidden"></div>
+
         <div class="modal-action">
           <button type="button" class="btn btn-ghost" onclick="upload_modal.close()">Abbrechen</button>
-          <button type="submit" class="btn btn-primary">Hochladen</button>
+          <button type="button" class="btn btn-primary" onclick="planUpload()">Vorschau</button>
         </div>
-      </form>
+      </div>
+
+      <div id="upload_preview" class="space-y-3 hidden">
+        <div id="upload_preview_body"></div>
+        <div class="modal-action">
+          <button type="button" class="btn btn-ghost" onclick="cancelPreview()">Zurück</button>
+          <button type="button" class="btn btn-primary" id="upload_confirm_btn" onclick="confirmUpload()">Ja, hochladen</button>
+        </div>
+      </div>
     </div>
     <form method="dialog" class="modal-backdrop"><button>close</button></form>
   </dialog>
@@ -291,6 +318,133 @@
     }
 
     qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+    // --- Upload flow (folder-capable, two-step with confirmation) ---
+    let uploadPending = [];
+
+    function uploadShowError(msg) {
+      const el = document.getElementById('upload_error');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+    function uploadHideError() {
+      document.getElementById('upload_error').classList.add('hidden');
+    }
+
+    function collectSelectedFiles() {
+      const fromFiles = Array.from(document.getElementById('upload_files_input').files || []);
+      const fromFolder = Array.from(document.getElementById('upload_folder_input').files || []);
+      // Only .json/.txt/.srt; everything else in a folder is irrelevant noise.
+      const all = [...fromFiles, ...fromFolder].filter(
+        f => /\.(json|txt|srt)$/i.test(f.name)
+      );
+      // Dedupe by basename so a file picked in both inputs is only sent once.
+      const seen = new Set();
+      const out = [];
+      for (const f of all) {
+        if (seen.has(f.name)) continue;
+        seen.add(f.name);
+        out.push(f);
+      }
+      return out;
+    }
+
+    async function planUpload() {
+      uploadHideError();
+      const token = document.getElementById('upload_token_input').value;
+      if (!token) { uploadShowError('Bitte Upload Token eintragen.'); return; }
+      const files = collectSelectedFiles();
+      if (!files.length) {
+        uploadShowError('Keine passenden Dateien gefunden (nur .json/.txt/.srt).');
+        return;
+      }
+      const names = files.map(f => f.name);
+      let plan;
+      try {
+        const r = await fetch('/upload/plan', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({upload_token: token, names}),
+        });
+        if (!r.ok) {
+          const msg = await r.text();
+          uploadShowError(`Vorschau fehlgeschlagen (${r.status}): ${msg.slice(0, 200)}`);
+          return;
+        }
+        plan = await r.json();
+      } catch (e) {
+        uploadShowError('Netzwerkfehler bei /upload/plan: ' + e.message);
+        return;
+      }
+
+      const approved = new Set();
+      for (const ep of plan.episodes) for (const n of ep.files) approved.add(n);
+      uploadPending = files.filter(f => approved.has(f.name));
+
+      renderUploadPreview(plan);
+      document.getElementById('upload_pick').classList.add('hidden');
+      document.getElementById('upload_preview').classList.remove('hidden');
+    }
+
+    function renderUploadPreview(plan) {
+      const body = document.getElementById('upload_preview_body');
+      const section = (title, cls, items, render) => items.length ? `
+        <div class="card bg-base-200 mt-2"><div class="card-body p-4">
+          <h4 class="font-bold ${cls}">${escapeHtml(title)} — ${items.length}</h4>
+          <ul class="divide-y divide-base-300 max-h-48 overflow-auto">${items.map(render).join('')}</ul>
+        </div></div>` : '';
+
+      const eps = section(
+        'Bereit zum Upload', 'text-success', plan.episodes,
+        e => `<li class="py-1"><code>${escapeHtml(e.stem)}</code></li>`
+      );
+      const inc = section(
+        'Unvollständig (wird übersprungen)', 'text-warning', plan.incomplete,
+        e => `<li class="py-1"><code>${escapeHtml(e.stem)}</code> <span class="text-xs opacity-70">fehlt: ${e.missing.map(escapeHtml).join(', ')}</span></li>`
+      );
+      const rej = section(
+        'Nicht erkannt', 'text-error', plan.rejected,
+        r => `<li class="py-1 text-xs"><code>${escapeHtml(r.name)}</code> — ${escapeHtml(r.reason)}</li>`
+      );
+
+      const header = plan.episodes.length
+        ? `<p class="text-sm">Sind das alle <b>${plan.episodes.length}</b> Episoden, die hochgeladen werden sollen?</p>`
+        : `<div class="alert alert-warning"><span>Keine vollständige Episode erkannt — nichts zum Hochladen.</span></div>`;
+
+      body.innerHTML = header + eps + inc + rej;
+      document.getElementById('upload_confirm_btn').disabled = plan.episodes.length === 0;
+    }
+
+    function cancelPreview() {
+      document.getElementById('upload_preview').classList.add('hidden');
+      document.getElementById('upload_pick').classList.remove('hidden');
+      uploadPending = [];
+    }
+
+    async function confirmUpload() {
+      if (!uploadPending.length) return;
+      const token = document.getElementById('upload_token_input').value;
+      const fd = new FormData();
+      for (const f of uploadPending) fd.append('files', f, f.name);
+      fd.append('upload_token', token);
+      const btn = document.getElementById('upload_confirm_btn');
+      btn.disabled = true;
+      const originalLabel = btn.textContent;
+      btn.textContent = 'Lädt hoch…';
+      try {
+        const r = await fetch('/upload', {method: 'POST', body: fd});
+        const html = await r.text();
+        // The /upload response is a full HTML page (upload_result.html).
+        // Replace the document with it so the user sees the normal result view.
+        document.open();
+        document.write(html);
+        document.close();
+      } catch (e) {
+        uploadShowError('Upload fehlgeschlagen: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+      }
+    }
   </script>
 </body>
 </html>
