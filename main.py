@@ -18,6 +18,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 BASE = Path(__file__).parent
 PODCASTS = BASE / "podcasts"
@@ -30,6 +31,7 @@ STATIC.mkdir(exist_ok=True)
 UPLOAD_TOKEN_FILE = BASE / ".upload_token"
 MAX_FILE_BYTES = 200 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
+MAX_PLAN_NAMES = 5000
 PENDING_TTL_SECONDS = 3600
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -81,8 +83,14 @@ def check_json_meta(meta) -> dict:
     return meta
 
 
-def classify_upload(upload: UploadFile) -> tuple[str, str]:
-    name = (upload.filename or "").strip()
+def classify_filename(raw: str) -> tuple[str, str]:
+    """Validate an episode filename and return (stem, ext).
+
+    Single source of truth for the naming rule, used by both the
+    multipart /upload path (via classify_upload) and the JSON
+    /upload/plan preview endpoint.
+    """
+    name = (raw or "").strip()
     if not name:
         raise ValueError("empty filename")
     if "/" in name or "\\" in name or ".." in name:
@@ -94,6 +102,10 @@ def classify_upload(upload: UploadFile) -> tuple[str, str]:
     if not STEM_RE.match(base):
         raise ValueError(f"stem must match YYYY-MM-DD_slug (got '{base}')")
     return base, ext
+
+
+def classify_upload(upload: UploadFile) -> tuple[str, str]:
+    return classify_filename(upload.filename or "")
 
 
 def validate_episode_trio(
@@ -470,6 +482,69 @@ async def upload_resolve(request: Request):
             "upload_id": "",
         },
     )
+
+
+class PlanPayload(BaseModel):
+    upload_token: str = ""
+    names: list[str] = []
+
+
+@app.post("/upload/plan")
+def upload_plan(payload: PlanPayload):
+    """Dry-run preview for the folder-upload flow.
+
+    Given the flat list of basenames from the browser's folder picker,
+    group them into complete episode trios, incomplete trios, and
+    rejections. No bytes are read, nothing is written — this is a
+    pure classification pass over the filenames so the client can
+    render a confirmation list before POSTing the real files to
+    /upload.
+    """
+    expected = get_upload_token()
+    if not expected:
+        raise HTTPException(503, "Upload disabled: no server token configured")
+    if not secrets.compare_digest(payload.upload_token, expected):
+        raise HTTPException(401, "Invalid upload token")
+    if len(payload.names) > MAX_PLAN_NAMES:
+        raise HTTPException(413, f"Too many names (max {MAX_PLAN_NAMES})")
+
+    groups: dict[str, dict[str, str]] = {}
+    rejected: list[dict] = []
+
+    for name in payload.names:
+        try:
+            base, ext = classify_filename(name)
+        except ValueError as e:
+            rejected.append({"name": name, "reason": str(e)})
+            continue
+        grp = groups.setdefault(base, {})
+        if ext in grp:
+            rejected.append(
+                {"name": name, "reason": f"duplicate .{ext} for stem {base}"}
+            )
+            continue
+        grp[ext] = name
+
+    episodes: list[dict] = []
+    incomplete: list[dict] = []
+    for stem in sorted(groups):
+        trio = groups[stem]
+        have = set(trio.keys())
+        if {"json", "txt", "srt"} <= have:
+            episodes.append(
+                {"stem": stem, "files": [trio[k] for k in ("json", "txt", "srt")]}
+            )
+        else:
+            missing = sorted({"json", "txt", "srt"} - have)
+            incomplete.append(
+                {
+                    "stem": stem,
+                    "files": [trio[k] for k in sorted(have)],
+                    "missing": missing,
+                }
+            )
+
+    return {"episodes": episodes, "incomplete": incomplete, "rejected": rejected}
 
 
 @app.get("/download/{rel:path}")
