@@ -9,7 +9,8 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 
-from rank_bm25 import BM25Okapi
+from rapidfuzz import process as fz_process
+from rank_bm25 import BM25L
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
@@ -607,6 +608,17 @@ def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
     return ""
 
 
+def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) -> list[str]:
+    """For each query token, add close vocabulary matches (rapidfuzz)."""
+    expanded = list(query_tokens)
+    for tok in query_tokens:
+        if tok in vocab:
+            continue  # exact match — no expansion needed
+        hits = fz_process.extract(tok, vocab, score_cutoff=cutoff, limit=3)
+        expanded.extend(match for match, *_ in hits)
+    return expanded
+
+
 @app.get("/api/search")
 def search(q: str = ""):
     q = q.strip().lower()
@@ -620,8 +632,11 @@ def search(q: str = ""):
     txts = [_ep_txt(ep) for ep in all_eps]
     cues_list = [_parse_srt_cues(ep) for ep in all_eps]
     corpus = [_ep_tokens(ep, txt, cues) for ep, txt, cues in zip(all_eps, txts, cues_list)]
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(q.split())
+    bm25 = BM25L(corpus)
+
+    vocab: set[str] = {tok for doc in corpus for tok in doc}
+    query_tokens = _fuzzy_expand(q.split(), vocab)
+    scores = bm25.get_scores(query_tokens)
 
     ranked = []
     for score, ep, txt, cues in zip(scores, all_eps, txts, cues_list):
