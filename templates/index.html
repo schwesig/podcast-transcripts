@@ -82,7 +82,7 @@
     <div class="card bg-base-100 shadow-xl mb-6">
       <div class="card-body">
         <h2 class="card-title">Suche</h2>
-        <p class="text-sm opacity-70">Suche in Titel, Show, Summary und Volltext (TXT).</p>
+        <p class="text-sm opacity-70">Suche in Titel, Show, Summary, Volltext (TXT) und Untertiteln (SRT) — mit Zeitstempel.</p>
         <div class="join w-full mt-2">
           <input id="q" type="search" placeholder="Suchbegriff…"
                  class="input input-bordered join-item w-full" />
@@ -284,7 +284,8 @@
         return;
       }
       searchResults.innerHTML = eps.map(ep => {
-        const snippet = ep.snippet ? `<p class="snippet text-sm mt-2 opacity-80">${highlight(ep.snippet, q)}</p>` : '';
+        const tsLabel = ep.timestamp ? `<span class="badge badge-neutral badge-sm font-mono">⏱ ${escapeHtml(ep.timestamp)}</span>` : '';
+        const snippet = ep.snippet ? `<p class="snippet text-sm mt-2 opacity-80">${tsLabel} ${highlight(ep.snippet, q)}</p>` : (tsLabel ? `<p class="mt-2">${tsLabel}</p>` : '');
         const epnum = ep.episode_number ? `<span class="badge badge-accent">#${escapeHtml(ep.episode_number)}</span>` : '';
         const meta = [ep.show, ep.date, ep.duration].filter(Boolean).map(escapeHtml).join(' · ');
         return `
