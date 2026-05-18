@@ -9,6 +9,8 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from pathlib import Path
 
+from rank_bm25 import BM25Okapi
+
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -559,6 +561,52 @@ def preview(rel: str):
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _ep_txt(ep: dict) -> str:
+    txt_fmt = ep["formats"].get("txt")
+    if txt_fmt:
+        return (PODCASTS / txt_fmt["rel"]).read_text(encoding="utf-8", errors="ignore")
+    return ""
+
+
+# Each cue: (timestamp_str "HH:MM:SS", cue_text)
+_SRT_CUE_BLOCK = re.compile(
+    r"\d+\s*\n(\d{2}:\d{2}:\d{2})[,\.]\d{3}\s*-->[^\n]+\n([\s\S]*?)(?=\n\s*\n|\Z)",
+    re.MULTILINE,
+)
+
+
+def _parse_srt_cues(ep: dict) -> list[tuple[str, str]]:
+    """Return list of (timestamp, text) for every cue in the SRT file."""
+    srt_fmt = ep["formats"].get("srt")
+    if not srt_fmt:
+        return []
+    raw = (PODCASTS / srt_fmt["rel"]).read_text(encoding="utf-8", errors="ignore")
+    return [(m.group(1), m.group(2).replace("\n", " ").strip()) for m in _SRT_CUE_BLOCK.finditer(raw)]
+
+
+def _ep_tokens(ep: dict, txt: str, cues: list[tuple[str, str]]) -> list[str]:
+    """Build the token bag for one episode (title + show + summary + txt + srt)."""
+    srt_text = " ".join(text for _, text in cues)
+    return " ".join([ep["title"], ep["show"], ep["summary"], txt, srt_text]).lower().split()
+
+
+def _make_snippet(text: str, q: str, context: int = 60) -> str:
+    idx = text.lower().find(q)
+    if idx < 0:
+        return ""
+    start = max(0, idx - context)
+    end = min(len(text), idx + len(q) + context)
+    return f"…{text[start:end].replace(chr(10), ' ')}…"
+
+
+def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
+    """Return timestamp of the first SRT cue containing q, or empty string."""
+    for ts, text in cues:
+        if q in text.lower():
+            return ts
+    return ""
+
+
 @app.get("/api/search")
 def search(q: str = ""):
     q = q.strip().lower()
@@ -568,26 +616,24 @@ def search(q: str = ""):
         all_eps.extend(show["episodes"])
     if not q:
         return {"episodes": all_eps}
-    hits = []
-    for ep in all_eps:
-        if q in ep["title"].lower() or q in ep["show"].lower():
-            hits.append({**ep, "match": "title"})
+
+    txts = [_ep_txt(ep) for ep in all_eps]
+    cues_list = [_parse_srt_cues(ep) for ep in all_eps]
+    corpus = [_ep_tokens(ep, txt, cues) for ep, txt, cues in zip(all_eps, txts, cues_list)]
+    bm25 = BM25Okapi(corpus)
+    scores = bm25.get_scores(q.split())
+
+    ranked = []
+    for score, ep, txt, cues in zip(scores, all_eps, txts, cues_list):
+        if score <= 0:
             continue
-        if q in ep["summary"].lower():
-            idx = ep["summary"].lower().find(q)
-            start = max(0, idx - 60)
-            end = min(len(ep["summary"]), idx + len(q) + 60)
-            hits.append({**ep, "match": "summary", "snippet": f"…{ep['summary'][start:end]}…"})
-            continue
-        txt_fmt = ep["formats"].get("txt")
-        if txt_fmt:
-            content = (PODCASTS / txt_fmt["rel"]).read_text(
-                encoding="utf-8", errors="ignore"
-            )
-            idx = content.lower().find(q)
-            if idx >= 0:
-                start = max(0, idx - 60)
-                end = min(len(content), idx + len(q) + 60)
-                snippet = content[start:end].replace("\n", " ")
-                hits.append({**ep, "match": "content", "snippet": f"…{snippet}…"})
-    return {"episodes": hits}
+        snippet = (
+            _make_snippet(ep["title"] + " " + ep["show"], q)
+            or _make_snippet(ep["summary"], q)
+            or _make_snippet(txt, q)
+        )
+        timestamp = _find_timestamp(cues, q)
+        ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp}))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return {"episodes": [ep for _, ep in ranked]}
