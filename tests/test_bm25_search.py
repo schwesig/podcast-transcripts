@@ -87,3 +87,30 @@ def test_search_result_has_snippet(client, corpus):
     for ep in eps:
         assert "snippet" in ep
         assert "meditation" in ep["snippet"].lower()
+
+
+def test_search_result_has_timestamp_when_match_in_srt(client, corpus, tmp_tree):
+    """When the query term appears in a SRT cue, the result includes the
+    timestamp of that cue (HH:MM:SS) in the `timestamp` field."""
+    podcasts, _, _ = tmp_tree
+    ep_dir = podcasts / "show" / "ep-ts"
+    ep_dir.mkdir(parents=True)
+    meta = {"podcast": "show", "title": "ep-ts"}
+    (ep_dir / "2023-01-01_ep-ts.json").write_text(
+        json.dumps(meta), encoding="utf-8"
+    )
+    (ep_dir / "2023-01-01_ep-ts.txt").write_text(
+        "some content", encoding="utf-8"
+    )
+    srt = (
+        "1\n00:03:15,000 --> 00:03:18,000\ndeep meditation practice\n\n"
+        "2\n00:10:00,000 --> 00:10:03,000\nsomething else\n"
+    )
+    (ep_dir / "2023-01-01_ep-ts.srt").write_text(srt, encoding="utf-8")
+
+    r = client.get("/api/search", params={"q": "meditation"})
+    assert r.status_code == 200
+    eps = r.json()["episodes"]
+    ts_ep = next((ep for ep in eps if ep["title"] == "ep-ts"), None)
+    assert ts_ep is not None
+    assert ts_ep["timestamp"] == "00:03:15"

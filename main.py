@@ -568,9 +568,26 @@ def _ep_txt(ep: dict) -> str:
     return ""
 
 
-def _ep_tokens(ep: dict, txt: str) -> list[str]:
-    """Build the token bag for one episode (title + show + summary + txt body)."""
-    return " ".join([ep["title"], ep["show"], ep["summary"], txt]).lower().split()
+# Each cue: (timestamp_str "HH:MM:SS", cue_text)
+_SRT_CUE_BLOCK = re.compile(
+    r"\d+\s*\n(\d{2}:\d{2}:\d{2})[,\.]\d{3}\s*-->[^\n]+\n([\s\S]*?)(?=\n\s*\n|\Z)",
+    re.MULTILINE,
+)
+
+
+def _parse_srt_cues(ep: dict) -> list[tuple[str, str]]:
+    """Return list of (timestamp, text) for every cue in the SRT file."""
+    srt_fmt = ep["formats"].get("srt")
+    if not srt_fmt:
+        return []
+    raw = (PODCASTS / srt_fmt["rel"]).read_text(encoding="utf-8", errors="ignore")
+    return [(m.group(1), m.group(2).replace("\n", " ").strip()) for m in _SRT_CUE_BLOCK.finditer(raw)]
+
+
+def _ep_tokens(ep: dict, txt: str, cues: list[tuple[str, str]]) -> list[str]:
+    """Build the token bag for one episode (title + show + summary + txt + srt)."""
+    srt_text = " ".join(text for _, text in cues)
+    return " ".join([ep["title"], ep["show"], ep["summary"], txt, srt_text]).lower().split()
 
 
 def _make_snippet(text: str, q: str, context: int = 60) -> str:
@@ -580,6 +597,14 @@ def _make_snippet(text: str, q: str, context: int = 60) -> str:
     start = max(0, idx - context)
     end = min(len(text), idx + len(q) + context)
     return f"…{text[start:end].replace(chr(10), ' ')}…"
+
+
+def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
+    """Return timestamp of the first SRT cue containing q, or empty string."""
+    for ts, text in cues:
+        if q in text.lower():
+            return ts
+    return ""
 
 
 @app.get("/api/search")
@@ -593,21 +618,22 @@ def search(q: str = ""):
         return {"episodes": all_eps}
 
     txts = [_ep_txt(ep) for ep in all_eps]
-    corpus = [_ep_tokens(ep, txt) for ep, txt in zip(all_eps, txts)]
+    cues_list = [_parse_srt_cues(ep) for ep in all_eps]
+    corpus = [_ep_tokens(ep, txt, cues) for ep, txt, cues in zip(all_eps, txts, cues_list)]
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(q.split())
 
     ranked = []
-    for score, ep, txt in zip(scores, all_eps, txts):
+    for score, ep, txt, cues in zip(scores, all_eps, txts, cues_list):
         if score <= 0:
             continue
-        # Pick first matching context: title/show > summary > txt body
         snippet = (
             _make_snippet(ep["title"] + " " + ep["show"], q)
             or _make_snippet(ep["summary"], q)
             or _make_snippet(txt, q)
         )
-        ranked.append((score, {**ep, "snippet": snippet}))
+        timestamp = _find_timestamp(cues, q)
+        ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp}))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     return {"episodes": [ep for _, ep in ranked]}
