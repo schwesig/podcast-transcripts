@@ -642,12 +642,19 @@ def search(q: str = ""):
     for score, ep, txt, cues in zip(scores, all_eps, txts, cues_list):
         if score <= 0:
             continue
-        snippet = (
-            _make_snippet(ep["title"] + " " + ep["show"], q)
-            or _make_snippet(ep["summary"], q)
-            or _make_snippet(txt, q)
-        )
-        timestamp = _find_timestamp(cues, q)
+        snippet = ""
+        timestamp = ""
+        for term in query_tokens:
+            if not snippet:
+                snippet = (
+                    _make_snippet(ep["title"] + " " + ep["show"], term)
+                    or _make_snippet(ep["summary"], term)
+                    or _make_snippet(txt, term)
+                )
+            if not timestamp:
+                timestamp = _find_timestamp(cues, term)
+            if snippet and timestamp:
+                break
         ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp}))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
