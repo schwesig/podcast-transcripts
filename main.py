@@ -687,9 +687,14 @@ def search(q: str = ""):
                 )
                 if s:
                     snippet = s
-                    # Use the match_term that corresponds to this expansion
-                    # if we can find it, otherwise fall back to the term itself.
-                    match_term = term if term in match_terms else (match_terms[0] if match_terms else term)
+                    # match_term must be a substring of the snippet so the
+                    # frontend can highlight it.  Find the first query_token
+                    # that actually appears in the snippet; fall back to the
+                    # original query if none do.
+                    match_term = next(
+                        (t for t in query_tokens if t in s.lower()),
+                        q,
+                    )
             if not timestamp:
                 timestamp = _find_timestamp(cues, term)
             if snippet and timestamp:
