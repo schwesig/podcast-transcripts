@@ -284,9 +284,16 @@
         return;
       }
       searchResults.innerHTML = eps.map(ep => {
-        const tsLabel = ep.timestamp ? `<span class="badge badge-neutral badge-sm font-mono">⏱ ${escapeHtml(ep.timestamp)}</span>` : '';
-        const hlTerm = ep.match_term || q;
-        const snippet = ep.snippet ? `<p class="snippet text-sm mt-2 opacity-80">${tsLabel} ${highlight(ep.snippet, hlTerm)}</p>` : (tsLabel ? `<p class="mt-2">${tsLabel}</p>` : '');
+        const matchEntries = (ep.matches && ep.matches.length)
+          ? ep.matches
+          : (ep.snippet ? [{ snippet: ep.snippet, timestamp: ep.timestamp, match_term: ep.match_term }] : []);
+        const snippet = matchEntries.map(m => {
+          const tsLabel = m.timestamp ? `<span class="badge badge-neutral badge-sm font-mono">⏱ ${escapeHtml(m.timestamp)}</span>` : '';
+          const hlTerm = m.match_term || q;
+          return m.snippet
+            ? `<p class="snippet text-sm mt-1 opacity-80">${tsLabel} ${highlight(m.snippet, hlTerm)}</p>`
+            : (tsLabel ? `<p class="mt-1">${tsLabel}</p>` : '');
+        }).join('');
         const epnum = ep.episode_number ? `<span class="badge badge-accent">#${escapeHtml(ep.episode_number)}</span>` : '';
         const meta = [ep.show, ep.date, ep.duration].filter(Boolean).map(escapeHtml).join(' · ');
         return `
