@@ -608,15 +608,30 @@ def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
     return ""
 
 
-def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) -> list[str]:
-    """For each query token, add close vocabulary matches (rapidfuzz)."""
-    expanded = list(query_tokens)
+def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) -> tuple[list[str], list[str]]:
+    """Expand query tokens with close vocab matches.
+
+    Returns (all_tokens, match_terms) where match_terms are the best
+    representative tokens per original query token — used for snippet
+    highlighting.  Exact hits keep the original token; fuzzy hits use
+    the best vocab match.
+    """
+    all_tokens: list[str] = []
+    match_terms: list[str] = []
     for tok in query_tokens:
         if tok in vocab:
-            continue  # exact match — no expansion needed
-        hits = fz_process.extract(tok, vocab, score_cutoff=cutoff, limit=3)
-        expanded.extend(match for match, *_ in hits)
-    return expanded
+            all_tokens.append(tok)
+            match_terms.append(tok)
+        else:
+            hits = fz_process.extract(tok, vocab, score_cutoff=cutoff, limit=3)
+            if hits:
+                best = hits[0][0]
+                all_tokens.extend(h[0] for h in hits)
+                match_terms.append(best)
+            else:
+                all_tokens.append(tok)
+                match_terms.append(tok)
+    return all_tokens, match_terms
 
 
 @app.get("/api/search")
@@ -634,8 +649,8 @@ def search(q: str = ""):
     corpus = [_ep_tokens(ep, txt, cues) for ep, txt, cues in zip(all_eps, txts, cues_list)]
     bm25 = BM25L(corpus)
 
-    vocab: set[str] = {tok for doc in corpus for tok in doc}
-    query_tokens = _fuzzy_expand(q.split(), vocab)
+    vocab: set[str] = {tok for doc in corpus for tok in doc if len(tok) >= 4}
+    query_tokens, match_terms = _fuzzy_expand(q.split(), vocab)
     scores = bm25.get_scores(query_tokens)
 
     ranked = []
@@ -644,18 +659,22 @@ def search(q: str = ""):
             continue
         snippet = ""
         timestamp = ""
-        for term in query_tokens:
+        match_term = match_terms[0] if match_terms else q
+        for term in match_terms:
             if not snippet:
-                snippet = (
+                s = (
                     _make_snippet(ep["title"] + " " + ep["show"], term)
                     or _make_snippet(ep["summary"], term)
                     or _make_snippet(txt, term)
                 )
+                if s:
+                    snippet = s
+                    match_term = term
             if not timestamp:
                 timestamp = _find_timestamp(cues, term)
             if snippet and timestamp:
                 break
-        ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp}))
+        ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp, "match_term": match_term}))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     return {"episodes": [ep for _, ep in ranked]}
