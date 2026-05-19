@@ -672,31 +672,52 @@ def search(q: str = ""):
     for score, ep, txt, cues in zip(scores, all_eps, txts, cues_list):
         if score <= 0:
             continue
-        snippet = ""
-        match_term = match_terms[0] if match_terms else q
-        # Find snippet — try all expanded tokens until one matches.
+
+        # Build one match entry per unique token that actually appears in this episode.
+        seen_terms: set[str] = set()
+        matches: list[dict] = []
         for term in query_tokens:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            cue_text = " ".join(text for _, text in cues)
             s = (
                 _make_snippet(ep["title"] + " " + ep["show"], term)
                 or _make_snippet(ep["summary"], term)
                 or _make_snippet(txt, term)
+                or _make_snippet(cue_text, term)
             )
-            if s:
-                snippet = s
-                # match_term must be a substring of the snippet so the
-                # frontend can highlight it.
-                match_term = next(
-                    (t for t in query_tokens if t in s.lower()),
-                    q,
-                )
-                break
-        # Find timestamp using match_term so it points to the same cue
-        # as the snippet, then fall back to any other expanded token.
-        timestamp = _find_timestamp(cues, match_term) or next(
-            (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
-            "",
-        )
-        ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp, "match_term": match_term}))
+            if not s:
+                continue
+            # match_term must be a substring of the snippet.
+            # Prefer term itself if it's in the snippet, then any query token.
+            sl = s.lower()
+            mt = term if term in sl else next((t for t in query_tokens if t in sl), term)
+            ts = _find_timestamp(cues, mt) or _find_timestamp(cues, term) or next(
+                (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
+                "",
+            )
+            matches.append({"snippet": s, "timestamp": ts, "match_term": mt})
+
+        if not matches:
+            # Episode scored > 0 but match only in SRT metadata used by BM25;
+            # include with empty snippet so the result is still returned.
+            match_term = match_terms[0] if match_terms else q
+            ts = next(
+                (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
+                "",
+            )
+            matches = [{"snippet": "", "timestamp": ts, "match_term": match_term}]
+
+        # Top match drives the legacy top-level fields.
+        best = matches[0]
+        ranked.append((score, {
+            **ep,
+            "snippet": best["snippet"],
+            "timestamp": best["timestamp"],
+            "match_term": best["match_term"],
+            "matches": matches,
+        }))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     return {"episodes": [ep for _, ep in ranked]}
