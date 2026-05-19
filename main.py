@@ -609,12 +609,18 @@ def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
 
 
 def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) -> tuple[list[str], list[str]]:
-    """Expand query tokens with close vocab matches.
+    """Expand query tokens with prefix matches and/or close fuzzy vocab matches.
+
+    Strategy per token:
+    1. Exact match → keep as-is.
+    2. Prefix match (vocab token starts with query token, min 2 chars) → use
+       all prefix matches; best (shortest) becomes the match_term.
+    3. Fuzzy match (rapidfuzz score ≥ cutoff) → use top-3; best becomes match_term.
+    4. No match → pass through unchanged.
 
     Returns (all_tokens, match_terms) where match_terms are the best
     representative tokens per original query token — used for snippet
-    highlighting.  Exact hits keep the original token; fuzzy hits use
-    the best vocab match.
+    highlighting.
     """
     all_tokens: list[str] = []
     match_terms: list[str] = []
@@ -622,15 +628,24 @@ def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) ->
         if tok in vocab:
             all_tokens.append(tok)
             match_terms.append(tok)
+            continue
+        # Prefix expansion (only meaningful for tokens >= 2 chars)
+        if len(tok) >= 2:
+            prefix_hits = sorted(v for v in vocab if v.startswith(tok))
+            if prefix_hits:
+                all_tokens.extend(prefix_hits)
+                match_terms.append(prefix_hits[0])  # shortest = most specific
+                continue
+        # Fuzzy expansion (only against tokens >= 4 chars to avoid short noise)
+        long_vocab = {v for v in vocab if len(v) >= 4}
+        hits = fz_process.extract(tok, long_vocab, score_cutoff=cutoff, limit=3)
+        if hits:
+            best = hits[0][0]
+            all_tokens.extend(h[0] for h in hits)
+            match_terms.append(best)
         else:
-            hits = fz_process.extract(tok, vocab, score_cutoff=cutoff, limit=3)
-            if hits:
-                best = hits[0][0]
-                all_tokens.extend(h[0] for h in hits)
-                match_terms.append(best)
-            else:
-                all_tokens.append(tok)
-                match_terms.append(tok)
+            all_tokens.append(tok)
+            match_terms.append(tok)
     return all_tokens, match_terms
 
 
@@ -649,7 +664,7 @@ def search(q: str = ""):
     corpus = [_ep_tokens(ep, txt, cues) for ep, txt, cues in zip(all_eps, txts, cues_list)]
     bm25 = BM25L(corpus)
 
-    vocab: set[str] = {tok for doc in corpus for tok in doc if len(tok) >= 4}
+    vocab: set[str] = {tok for doc in corpus for tok in doc}
     query_tokens, match_terms = _fuzzy_expand(q.split(), vocab)
     scores = bm25.get_scores(query_tokens)
 
