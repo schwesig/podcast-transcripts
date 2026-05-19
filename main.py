@@ -585,10 +585,14 @@ def _parse_srt_cues(ep: dict) -> list[tuple[str, str]]:
     return [(m.group(1), m.group(2).replace("\n", " ").strip()) for m in _SRT_CUE_BLOCK.finditer(raw)]
 
 
+_PUNCT_RE = re.compile(r"[^\w\-]")
+
+
 def _ep_tokens(ep: dict, txt: str, cues: list[tuple[str, str]]) -> list[str]:
     """Build the token bag for one episode (title + show + summary + txt + srt)."""
     srt_text = " ".join(text for _, text in cues)
-    return " ".join([ep["title"], ep["show"], ep["summary"], txt, srt_text]).lower().split()
+    raw = " ".join([ep["title"], ep["show"], ep["summary"], txt, srt_text]).lower().split()
+    return [_PUNCT_RE.sub("", t) for t in raw if _PUNCT_RE.sub("", t)]
 
 
 def _make_snippet(text: str, q: str, context: int = 60) -> str:
