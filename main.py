@@ -631,7 +631,7 @@ def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) ->
             continue
         # Prefix expansion (only meaningful for tokens >= 2 chars)
         if len(tok) >= 2:
-            prefix_hits = sorted(v for v in vocab if v.startswith(tok))
+            prefix_hits = sorted((v for v in vocab if v.startswith(tok)), key=lambda x: (len(x), x))
             if prefix_hits:
                 all_tokens.extend(prefix_hits)
                 match_terms.append(prefix_hits[0])  # shortest = most specific
