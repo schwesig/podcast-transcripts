@@ -673,32 +673,29 @@ def search(q: str = ""):
         if score <= 0:
             continue
         snippet = ""
-        timestamp = ""
         match_term = match_terms[0] if match_terms else q
-        # Try all expanded tokens for snippet/timestamp — match_terms only
-        # covers the "best" representative per query token, but the actual
-        # text may contain a different expansion (e.g. "meditation" vs "meditating").
+        # Find snippet — try all expanded tokens until one matches.
         for term in query_tokens:
-            if not snippet:
-                s = (
-                    _make_snippet(ep["title"] + " " + ep["show"], term)
-                    or _make_snippet(ep["summary"], term)
-                    or _make_snippet(txt, term)
+            s = (
+                _make_snippet(ep["title"] + " " + ep["show"], term)
+                or _make_snippet(ep["summary"], term)
+                or _make_snippet(txt, term)
+            )
+            if s:
+                snippet = s
+                # match_term must be a substring of the snippet so the
+                # frontend can highlight it.
+                match_term = next(
+                    (t for t in query_tokens if t in s.lower()),
+                    q,
                 )
-                if s:
-                    snippet = s
-                    # match_term must be a substring of the snippet so the
-                    # frontend can highlight it.  Find the first query_token
-                    # that actually appears in the snippet; fall back to the
-                    # original query if none do.
-                    match_term = next(
-                        (t for t in query_tokens if t in s.lower()),
-                        q,
-                    )
-            if not timestamp:
-                timestamp = _find_timestamp(cues, term)
-            if snippet and timestamp:
                 break
+        # Find timestamp using match_term so it points to the same cue
+        # as the snippet, then fall back to any other expanded token.
+        timestamp = _find_timestamp(cues, match_term) or next(
+            (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
+            "",
+        )
         ranked.append((score, {**ep, "snippet": snippet, "timestamp": timestamp, "match_term": match_term}))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
