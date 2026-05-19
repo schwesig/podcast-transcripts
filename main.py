@@ -660,7 +660,10 @@ def search(q: str = ""):
         snippet = ""
         timestamp = ""
         match_term = match_terms[0] if match_terms else q
-        for term in match_terms:
+        # Try all expanded tokens for snippet/timestamp — match_terms only
+        # covers the "best" representative per query token, but the actual
+        # text may contain a different expansion (e.g. "meditation" vs "meditating").
+        for term in query_tokens:
             if not snippet:
                 s = (
                     _make_snippet(ep["title"] + " " + ep["show"], term)
@@ -669,7 +672,9 @@ def search(q: str = ""):
                 )
                 if s:
                     snippet = s
-                    match_term = term
+                    # Use the match_term that corresponds to this expansion
+                    # if we can find it, otherwise fall back to the term itself.
+                    match_term = term if term in match_terms else (match_terms[0] if match_terms else term)
             if not timestamp:
                 timestamp = _find_timestamp(cues, term)
             if snippet and timestamp:
