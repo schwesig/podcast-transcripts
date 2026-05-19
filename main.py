@@ -608,6 +608,11 @@ def _find_timestamp(cues: list[tuple[str, str]], q: str) -> str:
     return ""
 
 
+def _find_all_timestamps(cues: list[tuple[str, str]], q: str) -> list[str]:
+    """Return timestamps of all SRT cues containing q."""
+    return [ts for ts, text in cues if q in text.lower()]
+
+
 def _fuzzy_expand(query_tokens: list[str], vocab: set[str], cutoff: int = 80) -> tuple[list[str], list[str]]:
     """Expand query tokens with prefix matches and/or close fuzzy vocab matches.
 
@@ -673,31 +678,45 @@ def search(q: str = ""):
         if score <= 0:
             continue
 
-        # Build one match entry per unique token that actually appears in this episode.
+        # Build one match entry per distinct occurrence of each token.
+        # For SRT: one entry per matching cue (each has its own timestamp+snippet).
+        # For non-SRT sources (title/summary/txt): one entry total per term.
         seen_terms: set[str] = set()
+        seen_ts: set[str] = set()
         matches: list[dict] = []
+
+        def _add_match(snippet: str, term: str, ts: str) -> None:
+            sl = snippet.lower()
+            mt = term if term in sl else next((t for t in query_tokens if t in sl), term)
+            key = (mt, ts)
+            if key in seen_ts:
+                return
+            seen_ts.add(key)
+            matches.append({"snippet": snippet, "timestamp": ts, "match_term": mt})
+
         for term in query_tokens:
             if term in seen_terms:
                 continue
             seen_terms.add(term)
-            cue_text = " ".join(text for _, text in cues)
+
+            # One entry per matching SRT cue (different timestamps = different occurrences).
+            for ts, cue_text in cues:
+                s = _make_snippet(cue_text, term)
+                if s:
+                    _add_match(s, term, ts)
+
+            # One entry from non-SRT sources if not already covered by SRT.
             s = (
                 _make_snippet(ep["title"] + " " + ep["show"], term)
                 or _make_snippet(ep["summary"], term)
                 or _make_snippet(txt, term)
-                or _make_snippet(cue_text, term)
             )
-            if not s:
-                continue
-            # match_term must be a substring of the snippet.
-            # Prefer term itself if it's in the snippet, then any query token.
-            sl = s.lower()
-            mt = term if term in sl else next((t for t in query_tokens if t in sl), term)
-            ts = _find_timestamp(cues, mt) or _find_timestamp(cues, term) or next(
-                (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
-                "",
-            )
-            matches.append({"snippet": s, "timestamp": ts, "match_term": mt})
+            if s:
+                ts = _find_timestamp(cues, term) or next(
+                    (_find_timestamp(cues, t) for t in query_tokens if _find_timestamp(cues, t)),
+                    "",
+                )
+                _add_match(s, term, ts)
 
         if not matches:
             # Episode scored > 0 but match only in SRT metadata used by BM25;
